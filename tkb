@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# trading_kb 便捷启动器 —— 自动设置 PYTHONPATH,普通用户无需关心环境变量。
+# 用法:./tkb ingest | ./tkb ask "查询" | ./tkb stats | ./tkb sentiment-demo
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHONPATH="$DIR/src" exec python3 -m trading_kb.cli "$@"

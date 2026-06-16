@@ -1,0 +1,16 @@
+# 运行时数据与生成物(个人数据,不入库)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 系统
+.DS_Store
