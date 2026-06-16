@@ -123,6 +123,21 @@ class EntityRegistry:
             return _to_market_code(stock_code)
         return f"{type_}:{_normalize(name)}"
 
+    def watch_terms(self, types: tuple = ("stock",)) -> list[str]:
+        """返回可作"关注标的"的实体显示名(默认仅股票),供舆情 lane 实体过滤。
+
+        舆情碎片只有命中关注标的才轻抽入库,否则冷存留底(§10-bis ②)。
+        已合并(merged_into)的实体跳过,避免用废名做过滤。
+        """
+        qmarks = ",".join("?" * len(types))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT display_name FROM entities "
+            f"WHERE type IN ({qmarks}) AND (merged_into IS NULL OR merged_into='') "
+            f"AND display_name IS NOT NULL AND display_name<>''",
+            tuple(types),
+        ).fetchall()
+        return sorted(r["display_name"] for r in rows)
+
     def stats(self) -> dict:
         """注册表规模统计。"""
         n = self.conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
