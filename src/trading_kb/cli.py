@@ -213,6 +213,12 @@ def cmd_add(args) -> None:
     cmd_ingest(argparse.Namespace(limit=None))
 
 
+def cmd_web(args) -> None:
+    """启动本地 Web 控制台(单页,标准库,仅绑 127.0.0.1)。"""
+    from .web import serve
+    serve(port=args.port, open_browser=not args.no_open)
+
+
 def cmd_sentiment_demo(args) -> None:
     """舆情轻 lane 演示:用合成碎片跑通(本地无真实聊天数据)。
 
@@ -273,6 +279,11 @@ def main(argv=None) -> int:
     pdc.add_argument("--top", type=int, default=10)
     pdc.add_argument("--all", action="store_true", help="不限于有质疑标记的")
     pdc.set_defaults(func=cmd_deep_check)
+
+    pw = sub.add_parser("web", help="启动本地 Web 控制台(单页可视化)")
+    pw.add_argument("--port", type=int, default=8765)
+    pw.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    pw.set_defaults(func=cmd_web)
 
     pd = sub.add_parser("sentiment-demo", help="舆情轻 lane 演示")
     pd.set_defaults(func=cmd_sentiment_demo)
