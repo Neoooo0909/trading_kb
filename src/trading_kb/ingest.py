@@ -190,13 +190,16 @@ class ResearchIngestor:
         code_map: dict[str, str] = {}
         card_entity_names: list[str] = []
         for e in card_entities(card):
+            name = e.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue                       # 实体名缺失/非字符串(LLM 偶发畸形) → 跳这一个,不毁整卡
             kind = e.get("kind") or "concept"
-            etype = _kind_to_type(kind)
-            self.registry.resolve(e["name"], type_=etype, stock_code=e.get("code"))
-            card_entity_names.append(e["name"])
+            etype = _kind_to_type(kind)        # _kind_to_type 已对非字符串 kind 容错
+            self.registry.resolve(name, type_=etype, stock_code=e.get("code"))
+            card_entity_names.append(name)
             # A4:只有"股票"类才进 code_map(基金/指数/产品不锚成股票)
             if e.get("code") and kind == "stock":
-                code_map[_normalize(e["name"])] = e["code"]
+                code_map[_normalize(name)] = e["code"]
             report.entities_registered += 1
         for f in card_to_findings(card):
             report.findings += 1
@@ -206,8 +209,8 @@ class ResearchIngestor:
 
 
 def _kind_to_type(kind: str) -> str:
-    """report_lab 实体 kind → 注册表 type(A3/A4 归一)。"""
-    k = (kind or "").lower()
+    """report_lab 实体 kind → 注册表 type(A3/A4 归一)。kind 偶被 LLM 抽成 list/None,容错为 concept。"""
+    k = (kind if isinstance(kind, str) else "").lower()
     if k == "stock":
         return "stock"
     if k == "fund":
