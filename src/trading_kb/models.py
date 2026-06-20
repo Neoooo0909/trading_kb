@@ -17,7 +17,7 @@ from typing import Any, Literal, Optional
 Category = Literal["hard_fact", "structure", "quant_fact", "background"]
 
 # ── 成色等级(§19)────────────────────────────────────────────────────────
-EvidenceLevel = Literal["A", "B", "C", "D"]
+EvidenceLevel = Literal["A", "B+", "B", "C", "D"]
 
 # ── 事实状态(§18/§10.3 双时态生命周期)──────────────────────────────────
 FactStatus = Literal["active", "superseded", "invalidated", "expired", "disputed"]

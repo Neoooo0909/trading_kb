@@ -31,6 +31,8 @@ SOURCE_TRUST = {
     "announcement": "A",          # 公司公告
     "exchange_interaction": "A",  # 互动易/上证e互动
     "government": "A",            # 监管/政府文件
+    # B+ 级:外资行研报(高于国内券商)
+    "foreign_ib_research": "B+",  # 高盛/大摩/瑞银/JPM/美银/伯恩斯坦等
     # B 级:可佐证
     "broker_research": "B",       # 券商/投行研报
     "authoritative_media": "B",   # 权威财经媒体(白名单)

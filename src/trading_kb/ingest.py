@@ -45,7 +45,7 @@ class IngestReport:
 
     def __post_init__(self):
         if self.level_dist is None:
-            self.level_dist = {"A": 0, "B": 0, "C": 0, "D": 0}
+            self.level_dist = {"A": 0, "B+": 0, "B": 0, "C": 0, "D": 0}
 
 
 class ResearchIngestor:
@@ -233,8 +233,11 @@ def run_ingest(limit: Optional[int] = None, llm_classify=None) -> IngestReport:
     """端到端摄入入口:读 report_lab 全部卡片 → 入三层。返回回执。
 
     llm_classify:可选 LLM 分类钩子(签名 (Finding)->Category)。默认 None 走规则核心。
-    config.USE_LLM 仅作意图标志;真实 LLM 分类器需调用方注入此钩子(见 README C3)。
+    config.USE_LLM=1 时自动接 Kimi→DeepSeek→Sonnet 分类器(A 分流);显式传入则覆盖。
     """
+    if llm_classify is None and config.USE_LLM:        # A：USE_LLM 自动启用 LLM 分流
+        from .llm import make_llm_classify
+        llm_classify = make_llm_classify()
     config.ensure_data_dir()
     registry = EntityRegistry(config.ENTITY_DB)
     facts = FactsStore(config.FACTS_DB)

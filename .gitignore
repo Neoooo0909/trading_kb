@@ -4,6 +4,14 @@ data/
 *.sqlite
 *.sqlite3
 
+# 内容获取脚本(数据源工具,不对外暴露)+ 卡片 + 备份(只上传框架)
+scripts/
+cards/
+cards_ima/
+cards_dupes/
+.backup/
+*.log
+
 # Python
 __pycache__/
 *.py[cod]

@@ -53,7 +53,11 @@ def ask_payload(query: str, audit: bool) -> dict:
             "followup": [],
             "sources": [],
             "neighbors": [],
+            "synthesis": None,
         }
+        if config.USE_LLM and (res.facts or res.neighbors):   # C：Sonnet 合成
+            from .llm import synthesize_answer
+            out["synthesis"] = synthesize_answer(query, res.to_six_section())
         if active:
             top = active[0]
             te = _json_load(top.get("extra"), {})
@@ -110,9 +114,13 @@ def feed_payload(text: str, watch: str) -> dict:
                 frags.append((m.group(2).strip(), m.group(1)))
             else:
                 frags.append((line, ""))
+        stance_fn = None
+        if config.USE_LLM:                   # B：碎片立场走 LLM
+            from .llm import make_llm_stance
+            stance_fn = make_llm_stance()
         kept = cold = 0
         for t, ts in frags:
-            if lane.ingest_fragment(t, ts, terms):
+            if lane.ingest_fragment(t, ts, terms, llm=stance_fn):
                 kept += 1
             else:
                 cold += 1
@@ -457,6 +465,8 @@ function renderAsk(d){
     return;
   }
   let h='';
+  if(d.synthesis){
+    h+=`<div class="sec"><h3>🤖 AI 综合</h3><div class="concl" style="white-space:pre-wrap;font-weight:500">${esc(d.synthesis)}</div></div>`;}
   if(d.conclusion){const c=d.conclusion;
     h+=`<div class="sec"><h3>结论</h3><div class="concl">${dotFor(c.doubt)}<div>${esc(c.claim)} ${badge(c.level,c.unverifiable)}</div></div></div>`;}
   if(d.evidence.length){

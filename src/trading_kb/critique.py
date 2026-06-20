@@ -162,6 +162,8 @@ def _extract_metrics(f: Finding) -> list[tuple[str, float]]:
     """从 finding 的 numbers(带 context)抽取 (指标名, 数值)。"""
     out = []
     for n in f.numbers or []:
+        if not isinstance(n, dict):     # 容错:LLM 偶尔把数字返回成裸字符串(如 "1.6T")，跳过不崩
+            continue
         ctx = str(n.get("context", "")).lower()
         val = _parse_num(n.get("value"))
         if val is None:

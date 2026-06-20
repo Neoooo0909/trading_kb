@@ -50,7 +50,7 @@ def card_to_findings(card: dict) -> list[Finding]:
         findings.append(Finding(
             claim=f.get("claim", ""),
             evidence=f.get("evidence", "") or "",
-            numbers=f.get("numbers") or [],
+            numbers=_clean_numbers(f.get("numbers")),
             entities=[_ename(e) for e in (f.get("entities") or [])],
             page=f.get("page"),
             confidence=f.get("confidence", "") or "",
@@ -90,3 +90,15 @@ def _ename(e) -> str:
     if isinstance(e, dict):
         return e.get("name", "")
     return str(e)
+
+
+def _clean_numbers(nums) -> list[dict]:
+    """归一 numbers 为 dict 列表。LLM 偶尔把数字返回成裸字符串(如 "1.6T")→包成 dict,
+    防止下游 n.get(...) 崩(critique/verified_numbers 等)。非 str/dict 一律丢弃。"""
+    out = []
+    for n in nums or []:
+        if isinstance(n, dict):
+            out.append(n)
+        elif isinstance(n, (str, int, float)):
+            out.append({"value": str(n), "context": ""})
+    return out

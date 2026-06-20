@@ -20,6 +20,7 @@ SOURCE_KIND_BASELINE: dict[str, EvidenceLevel] = {
     "exchange_interaction": "A",
     "government_policy": "A",
     "broker_research": "B",
+    "foreign_ib_research": "B+",      # 外资行研报(高盛/大摩/瑞银/JPM等)→ B+,高于国内券商
     "industry_database": "B",
     "company_ir": "B",
     "expert_meeting": "C",
@@ -68,4 +69,4 @@ def grade_fact(f: Finding, predicate: str, verify=None) -> tuple[EvidenceLevel, 
 
 def _downgrade(level: EvidenceLevel) -> EvidenceLevel:
     """可验证类查无时温和降级:A→B→C,C/D 不再降(C 已是待验证底线)。"""
-    return {"A": "B", "B": "C", "C": "C", "D": "D"}[level]
+    return {"A": "B", "B+": "B", "B": "C", "C": "C", "D": "D"}[level]

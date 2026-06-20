@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading_kb"
-version = "0.1.0"
+version = "0.2.0"
 description = "A股个人投研知识系统 — 研报重lane + 舆情轻lane,时序事实+结构图+双轨成色"
 requires-python = ">=3.10"
 dependencies = []          # 核心仅用标准库;numpy 可选

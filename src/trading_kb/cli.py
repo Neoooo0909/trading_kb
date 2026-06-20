@@ -44,7 +44,14 @@ def cmd_ask(args) -> None:
     structure = StructureStore(config.STRUCTURE_DB)
     engine = AskEngine(reg, facts, structure)
     res = engine.ask(args.query, include_invalidated=args.audit)
-    print(res.to_six_section())
+    six = res.to_six_section()
+    if config.USE_LLM:                       # C：Sonnet 合成自然语言回答
+        from .llm import synthesize_answer
+        ans = synthesize_answer(args.query, six)
+        if ans:
+            print(ans)
+            print("\n" + "─" * 60 + "\n## 📎 检索材料(六段骨架)\n")
+    print(six)
     reg.close(); facts.close(); structure.close()
 
 
@@ -170,10 +177,14 @@ def cmd_feed_chat(args) -> None:
         print('    先 `./tkb ingest` 入研报建立标的池,或显式 `--watch "绿的谐波,宁德时代"`。')
         reg.close(); lane.close(); return
 
+    stance_fn = None
+    if config.USE_LLM:                       # B：碎片立场走 LLM
+        from .llm import make_llm_stance
+        stance_fn = make_llm_stance()
     frags = _read_fragments(path)
     kept = cold = 0
     for text, ts in frags:
-        item = lane.ingest_fragment(text, ts, watch)
+        item = lane.ingest_fragment(text, ts, watch, llm=stance_fn)
         if item:
             kept += 1
         else:

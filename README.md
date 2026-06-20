@@ -85,6 +85,19 @@ cd trading_kb
 
 > 详细用法见 [使用说明.md](使用说明.md)；完整项目说明见 [项目说明_完整版.md](项目说明_完整版.md)。
 
+## 🔌 数据从哪进来（内容获取在框架之外）
+
+本仓库是**框架**：三层知识库的入库 / 分级 / 质疑 / 问答。**内容获取**（券商研报下载、
+社媒抓取、公告抓取等）**不在本仓库内**——它们是各自独立的数据源工具，产物统一落成
+**卡片 JSON**，再由 `./tkb ingest` 读取入库。
+
+- **接入点 = 卡片 JSON**：schema 见 `src/trading_kb/report_lab_adapter.py` 的
+  `card_to_findings`（关键字段：`type / date / broker / findings[claim, evidence, numbers,
+  entities, confidence]`）。写个抓取器把任意来源抽成卡片 JSON → 放进 `cards/` →
+  `./tkb ingest`。框架不关心卡片从哪来。
+- **可选 LLM 增强**（`USE_LLM=1`：A 类智能分流 + 答案合成）走 `src/trading_kb/llm.py`，
+  需自备 `~/.config/{kimi,deepseek}/api_key`。**本仓库不含任何密钥 / token**。
+
 ---
 
 按 `design_final.md (v2.2)` 落地的可运行实现。复用 report_lab 的 extract+verify 护城河,

@@ -16,7 +16,7 @@ from typing import Optional
 
 from .models import Fact, EvidenceLevel
 
-_LEVEL_RANK = {"D": 0, "C": 1, "B": 2, "A": 3}
+_LEVEL_RANK = {"D": 0, "C": 1, "B": 2, "B+": 3, "A": 4}   # B+ 介于 B 与 A(外资行研报)
 
 
 class FactsStore:
