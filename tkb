@@ -4,4 +4,10 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # LLM 全开（Kimi→DeepSeek→Sonnet 处理语料）；置 TKB_USE_LLM=0 可临时关。
 export TKB_USE_LLM="${TKB_USE_LLM:-1}"
+# ask 完整六段输出 tee 一份到文件做持久全文副本：终端会折叠长工具输出（+N lines），
+# 文件保证随时可取全文（cat data/last_ask.md）。其余子命令照常 exec。
+if [ "${1:-}" = "ask" ]; then
+  PYTHONPATH="$DIR/src" python3 -m trading_kb.cli "$@" | tee "$DIR/data/last_ask.md"
+  exit "${PIPESTATUS[0]}"
+fi
 PYTHONPATH="$DIR/src" exec python3 -m trading_kb.cli "$@"
