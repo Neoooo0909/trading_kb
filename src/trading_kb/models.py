@@ -123,7 +123,12 @@ class SentimentItem:
 
 
 def _normalize(s: str) -> str:
-    """文本归一:去空白/标点/全角,小写。用于去重键。"""
+    """文本归一:小写 + 去空白(含全角空格)+ 去标点(含全角标点)。用于去重键。
+
+    注:不做全角数字/字母 NFKC 折叠(１２３→123、％→%)。实测全库仅 233/18.7万 事实含此类字符、
+    且仅 1 条会因此新增去重,而 NFKC 会改写整个 id/dedup 体系(facts/findings/sentiment/reattribute
+    全依赖本函数)——换 1 条收益不划算,故按设计不折叠。新增此类需求时须连带全库 id 迁移。
+    """
     if not s:
         return ""
     out = s.lower()

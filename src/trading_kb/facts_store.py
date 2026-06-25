@@ -75,47 +75,75 @@ class FactsStore:
         if existing is None:
             row = fact.to_row()
             row["unverifiable"] = int(fact.unverifiable)
-            self.conn.execute(
-                """INSERT INTO facts
-                   (fact_id,dedup_key,subject,predicate,object,canonical_id,claim,status,
-                    evidence_level,unverifiable,source_kind,support_count,sources,valid_at,
-                    invalid_at,supersedes,relation_id,category,extra)
-                   VALUES
-                   (:fact_id,:dedup_key,:subject,:predicate,:object,:canonical_id,:claim,:status,
-                    :evidence_level,:unverifiable,:source_kind,:support_count,:sources,:valid_at,
-                    :invalid_at,:supersedes,:relation_id,:category,:extra)""",
-                row,
-            )
-            self.conn.commit()
-            return fact.fact_id
+            try:
+                self.conn.execute(
+                    """INSERT INTO facts
+                       (fact_id,dedup_key,subject,predicate,object,canonical_id,claim,status,
+                        evidence_level,unverifiable,source_kind,support_count,sources,valid_at,
+                        invalid_at,supersedes,relation_id,category,extra)
+                       VALUES
+                       (:fact_id,:dedup_key,:subject,:predicate,:object,:canonical_id,:claim,:status,
+                        :evidence_level,:unverifiable,:source_kind,:support_count,:sources,:valid_at,
+                        :invalid_at,:supersedes,:relation_id,:category,:extra)""",
+                    row,
+                )
+                self.conn.commit()
+                return fact.fact_id
+            except sqlite3.IntegrityError:
+                # 并发竞态修复(TOCTOU):另一连接在本次 SELECT 与 INSERT 之间抢先插入了同
+                # dedup_key/fact_id。回滚未提交写入,重新读出已存在行,落到下方合并路径——
+                # 与 EntityRegistry.register 的 INSERT OR IGNORE 同思路,保证多线程 web 入库不抛 500。
+                self.conn.rollback()
+                existing = self.conn.execute(
+                    "SELECT * FROM facts WHERE dedup_key=?", (fact.dedup_key,)
+                ).fetchone()
+                if existing is None:
+                    raise
 
-        # 合并:累加来源、升级成色、support_count、保留最早 valid_at
-        merged_sources = sorted(set(json.loads(existing["sources"]) + fact.sources))
-        best_level = _max_level(existing["evidence_level"], fact.evidence_level)
-        # unverifiable 仅当"两条都未经数据验证"时才保持 True。
-        # 注:unverifiable=False 只由 grade 的数据验证(confirmed/refuted)产生,
-        # 故 AND 语义 = "任一来源经数据验证则整体已验证",是真实的多源印证,非洗白(M4)。
-        unver = int(bool(existing["unverifiable"]) and fact.unverifiable)
-        valid_at = min(filter(None, [existing["valid_at"], fact.valid_at]), default=fact.valid_at)
-        # 同 key 再次出现(如同一论断被再次确认):若旧行已被 superseded/invalidated,
-        # 在合并时复活为 active(C1:避免 supersede 自碰撞导致事实丢失)。
-        revive = existing["status"] in ("superseded", "invalidated", "expired")
-        if revive:
-            self.conn.execute(
-                """UPDATE facts SET sources=?, support_count=?, evidence_level=?, unverifiable=?,
-                                     valid_at=?, status='active', invalid_at=NULL WHERE dedup_key=?""",
-                (json.dumps(merged_sources, ensure_ascii=False), len(merged_sources),
-                 best_level, unver, valid_at, fact.dedup_key),
-            )
-        else:
-            self.conn.execute(
-                """UPDATE facts SET sources=?, support_count=?, evidence_level=?, unverifiable=?,
-                                     valid_at=? WHERE dedup_key=?""",
-                (json.dumps(merged_sources, ensure_ascii=False), len(merged_sources),
-                 best_level, unver, valid_at, fact.dedup_key),
-            )
-        self.conn.commit()
-        return existing["fact_id"]
+        # 合并:累加来源、升级成色、support_count、保留最早 valid_at。
+        # 乐观并发:UPDATE 带 `sources=旧值` 条件,被别的连接抢先改了(rowcount=0)则重读重试——
+        # 否则两请求同时写同一 fact 时,各自基于陈旧 sources 的 read-modify-write 会 lost-update,
+        # 丢源、support_count 少计(busy_timeout 只串行化写事务本身,挡不住跨连接的读改写竞态)。
+        for _ in range(8):
+            old_sources_json = existing["sources"]
+            merged_sources = sorted(set(json.loads(old_sources_json or "[]") + fact.sources))
+            # `or 1`:两侧 sources 均空时不应把已存在事实的 support_count 覆盖为 0(口径同 INSERT)
+            support = len(merged_sources) or 1
+            best_level = _max_level(existing["evidence_level"], fact.evidence_level)
+            # unverifiable 仅当"两条都未经数据验证"时才保持 True。
+            # 注:unverifiable=False 只由 grade 的数据验证(confirmed/refuted)产生,
+            # 故 AND 语义 = "任一来源经数据验证则整体已验证",是真实的多源印证,非洗白(M4)。
+            unver = int(bool(existing["unverifiable"]) and fact.unverifiable)
+            valid_at = min(filter(None, [existing["valid_at"], fact.valid_at]), default=fact.valid_at)
+            new_sources_json = json.dumps(merged_sources, ensure_ascii=False)
+            # 同 key 再次出现(如同一论断被再次确认):若旧行已被 superseded/invalidated,
+            # 在合并时复活为 active(C1:避免 supersede 自碰撞导致事实丢失)。
+            revive = existing["status"] in ("superseded", "invalidated", "expired")
+            if revive:
+                cur = self.conn.execute(
+                    """UPDATE facts SET sources=?, support_count=?, evidence_level=?, unverifiable=?,
+                                         valid_at=?, status='active', invalid_at=NULL
+                       WHERE dedup_key=? AND sources=?""",
+                    (new_sources_json, support, best_level, unver, valid_at,
+                     fact.dedup_key, old_sources_json),
+                )
+            else:
+                cur = self.conn.execute(
+                    """UPDATE facts SET sources=?, support_count=?, evidence_level=?, unverifiable=?,
+                                         valid_at=? WHERE dedup_key=? AND sources=?""",
+                    (new_sources_json, support, best_level, unver, valid_at,
+                     fact.dedup_key, old_sources_json),
+                )
+            self.conn.commit()
+            if cur.rowcount:
+                return existing["fact_id"]
+            # rowcount==0:sources 被别的连接抢先改了,重读最新行重试
+            existing = self.conn.execute(
+                "SELECT * FROM facts WHERE dedup_key=?", (fact.dedup_key,)
+            ).fetchone()
+            if existing is None:                       # 期间被删,回顶层重走 INSERT 路径
+                return self.upsert(fact)
+        raise sqlite3.OperationalError("facts.upsert 合并乐观重试 8 次仍冲突(并发异常)")
 
     # ── 状态变更 ──────────────────────────────────────────────────────────
     def supersede(self, old_fact_id: str, new_fact: Fact, at: str) -> str:
@@ -184,7 +212,50 @@ class FactsStore:
             args.append(predicate)
         if not include_invalidated:
             sql += " AND status IN ('active','disputed')"
-        sql += " ORDER BY evidence_level DESC, support_count DESC LIMIT ?"
+        # 成色排序修正：evidence_level 是 TEXT，DESC 字符串序会把 'D' 排到 'A' 前
+        # （'D'>'C'>'B+'>'B'>'A'），与"高成色优先"意图相反。用 CASE 映射 _LEVEL_RANK。
+        sql += (" ORDER BY CASE evidence_level"
+                " WHEN 'A' THEN 4 WHEN 'B+' THEN 3 WHEN 'B' THEN 2 WHEN 'C' THEN 1 ELSE 0 END DESC,"
+                " support_count DESC LIMIT ?")
+        args.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def search(self, text: str, canonical_id: Optional[str] = None,
+               include_invalidated: bool = False, limit: int = 400) -> list[dict]:
+        """文本召回(SQL LIKE 预筛，不受全表扫描上限)。
+
+        供 ask 在候选池上做 gram+成色+时效加权排序。中文无分词，按空白/标点切词后
+        任一 token 命中 claim/object/subject 即入候选。
+        根治旧 _keyword_facts 只扫前 2000 条导致大库召回坍缩的问题
+        (如精智达 167 条社媒事实因成色低排在 17 万条之后，进不了前 2000)。
+        """
+        import re as _re
+        from .models import content_grams as _cg
+        # token = 分隔符切的实词(保精确短语如 688627) ∪ content_grams(治无空格中文，
+        # 如"多空因子选股效果"整串 LIKE 不中，但 gram 多空/因子/选股/效果 能命中)
+        # 上限 40 字:防无分隔超长串(如恶意查询)被切成单个巨 token,生成 LIKE '%<上万字>%'
+        # 触发 SQLite "LIKE or GLOB pattern too complex"。真实标的名/关键词远不及 40 字。
+        words = [t for t in _re.split(r"[\s,，、;；。]+", text or "") if 2 <= len(t) <= 40]
+        grams = [g for g in _cg(text or "") if len(g) >= 2]
+        toks = list(dict.fromkeys(words + grams))[:24]
+        sql = "SELECT * FROM facts WHERE 1=1"
+        args: list = []
+        if not include_invalidated:
+            sql += " AND status IN ('active','disputed')"
+        if canonical_id:
+            sql += " AND canonical_id=?"
+            args.append(canonical_id)
+        if toks:
+            ors = []
+            for t in toks:
+                # 转义 LIKE 元字符 %_\，避免 token 里的 %/_ (如"净利率50%")被当通配符过度召回
+                esc = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                ors.append("(claim LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\' "
+                           "OR subject LIKE ? ESCAPE '\\')")
+                like = f"%{esc}%"
+                args += [like, like, like]
+            sql += " AND (" + " OR ".join(ors) + ")"
+        sql += " LIMIT ?"
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 

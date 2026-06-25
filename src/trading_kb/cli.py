@@ -43,7 +43,8 @@ def cmd_ask(args) -> None:
     facts = FactsStore(config.FACTS_DB)
     structure = StructureStore(config.STRUCTURE_DB)
     engine = AskEngine(reg, facts, structure)
-    res = engine.ask(args.query, include_invalidated=args.audit)
+    res = engine.ask(args.query, include_invalidated=args.audit,
+                     use_semantic=(True if getattr(args, "semantic", False) else None))
     six = res.to_six_section()
     if config.USE_LLM:                       # C：Sonnet 合成自然语言回答
         from .llm import synthesize_answer
@@ -142,7 +143,7 @@ def _read_fragments(path: Path) -> list[tuple[str, str]]:
     支持 `[..]`、`\\t`、`,`、`:` 等常见分隔;无时间戳则时间戳留空。
     """
     out: list[tuple[str, str]] = []
-    if not path.exists():
+    if not path.is_file():            # is_file 而非 exists:目录/空串("."→目录)不应进 read_text
         return out
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
@@ -163,8 +164,8 @@ def cmd_feed_chat(args) -> None:
     """
     config.ensure_data_dir()
     path = Path(args.file).expanduser()
-    if not path.exists():
-        print(f"✗ 找不到文件:{path}")
+    if not path.is_file():            # is_file:空串归一为目录"."、传目录都会绕过 exists() 后崩 read_text
+        print(f"✗ 找不到文件(需为普通文件):{path}")
         return
     reg = EntityRegistry(config.ENTITY_DB)
     lane = SentimentLane(config.SENTIMENT_DB, reg)
@@ -208,6 +209,17 @@ def cmd_add(args) -> None:
         print("  研报抽取依赖 report_lab;若只想入已有卡片,直接 `./tkb ingest`。")
         return
     paths = [str(Path(p).expanduser()) for p in args.paths]
+    # 入口预检:全部路径都不存在就别启动流水线——②extract 是耗 API 额度的抽卡步,
+    # 敲错路径不应空跑白耗额度(report_lab 对坏文件只标 FAIL 但整批 returncode=0,挡不住)。
+    missing = [p for p in paths if not Path(p).exists()]
+    if missing and len(missing) == len(paths):
+        print("✗ 以下路径均不存在,已中止(不消耗 API):")
+        for p in missing:
+            print(f"   - {p}")
+        return
+    if missing:
+        print(f"⚠️  {len(missing)} 个路径不存在,将跳过:{', '.join(missing)}")
+        paths = [p for p in paths if Path(p).exists()]
     batch_args = ["--batch", args.batch] if args.batch else []
     steps = [
         (["python3", "ingest.py", *paths, *batch_args], "① PDF 入库 + 判型(0 token)"),
@@ -255,6 +267,135 @@ def cmd_sentiment_demo(args) -> None:
     reg.close(); lane.close()
 
 
+def cmd_hyp(args) -> None:
+    """假设追踪(P1):一假设一 H*.md，证据按 for/against+成色累积、自动估置信度。"""
+    from .hypothesis import HypothesisStore
+    config.ensure_data_dir()
+    hs = HypothesisStore(config.DATA_DIR)
+    if args.action in ("show", "evidence", "resolve") and not hs.exists(args.text):
+        print(f"✗ 假设 {args.text or '(空)'} 不存在。用 `./tkb hyp list` 看现有假设。")
+        return
+    if args.action == "new":
+        if not args.text:
+            print("用法: ./tkb hyp new \"假设标题\" [--ticker 688627] [--statement 详述]"); return
+        hid = hs.new(args.text, ticker=args.ticker, statement=args.statement)
+        print(f"✓ 新建假设 {hid}: {args.text}  → {hs._path(hid)}")
+    elif args.action == "list":
+        rows = hs.list_all()
+        if not rows:
+            print("(暂无假设，用 ./tkb hyp new 创建)"); return
+        print(f"=== 活假设 {len(rows)} 条 ===")
+        for r in rows:
+            print(f"  {r['id']} [{r.get('status','?')}] 置信{r.get('confidence','?')} "
+                  f"证据{r.get('n_evidence',0)}条 | {r.get('ticker','')} {r.get('title','')}")
+    elif args.action == "show":
+        print(hs.get(args.text))
+    elif args.action == "evidence":
+        if not args.text or not args.ev:
+            print("用法: ./tkb hyp evidence H001 --ev \"证据\" --side for|against --grade B"); return
+        conf = hs.add_evidence(args.text, args.ev, side=args.side, grade=args.grade)
+        print(f"✓ {args.text} +证据[{args.side}/{args.grade}]，置信度→{conf:.2f}")
+    elif args.action == "resolve":
+        if not args.text or not args.ev:
+            print("用法: ./tkb hyp resolve H001 --verdict confirmed --ev \"结论\""); return
+        hs.resolve(args.text, args.verdict, args.ev)
+        print(f"✓ {args.text} 结案[{args.verdict}]")
+
+
+def cmd_friction(args) -> None:
+    """记一条摩擦日志到 data/friction-log.md(append-only，驱动系统改进)。"""
+    from .hypothesis import append_friction
+    config.ensure_data_dir()
+    append_friction(config.DATA_DIR, args.text)
+    print(f"✓ 已记录摩擦 → {config.DATA_DIR / 'friction-log.md'}")
+
+
+def cmd_debate(args) -> None:
+    """真多空对抗辩论(P2):多头→空头逐条反驳→风控裁决。需 TKB_USE_LLM=1。"""
+    config.ensure_data_dir()
+    if not config.USE_LLM:
+        print("⚠ 真对抗需 LLM。请 export TKB_USE_LLM=1 后重试。")
+        return
+    from .debate import debate, render
+    reg = EntityRegistry(config.ENTITY_DB)
+    facts = FactsStore(config.FACTS_DB)
+    structure = StructureStore(config.STRUCTURE_DB)
+    print(render(debate(args.query, AskEngine(reg, facts, structure))))
+    reg.close(); facts.close(); structure.close()
+
+
+def cmd_deep(args) -> None:
+    """真 agent loop 深度研究(P2):plan→动态取证(库/行情/财务)→汇总。需 TKB_USE_LLM=1。"""
+    config.ensure_data_dir()
+    if not config.USE_LLM:
+        print("⚠ 深度研究需 LLM。请 export TKB_USE_LLM=1 后重试。")
+        return
+    from .deep_ask import deep_ask
+    reg = EntityRegistry(config.ENTITY_DB)
+    facts = FactsStore(config.FACTS_DB)
+    structure = StructureStore(config.STRUCTURE_DB)
+    r = deep_ask(args.query, AskEngine(reg, facts, structure), tools=_build_data_tools())
+    print("## 研究过程")
+    for a, arg in r["steps"]:
+        print(f"  → {a}: {arg}")
+    print("\n## 回答\n" + r["answer"])
+    reg.close(); facts.close(); structure.close()
+
+
+def cmd_semantic(args) -> None:
+    """语义索引(P0.5)：build 增量建向量 / status 看覆盖。bge 优先、model2vec 兜底。"""
+    from .semantic import SemanticIndex
+    config.ensure_data_dir()
+    # build/status 显式定后端（默认 bge）；ask 才用 prefer=None 自动择"有数据"的后端
+    idx = SemanticIndex.shared(config.FACTS_DB, prefer=(getattr(args, "prefer", None) or "bge"))
+    if idx is None:
+        print("✗ 语义层不可用(.venv-embed/模型/numpy 缺失)。检查 .venv-embed 与模型目录。")
+        return
+    facts = FactsStore(config.FACTS_DB)
+    n_facts = facts.conn.execute(
+        "SELECT COUNT(*) FROM facts WHERE status IN ('active','disputed')").fetchone()[0]
+    if args.action == "status":
+        total = idx._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        print("=== 语义索引状态 ===")
+        print(f"后端: {idx.backend.name} ({idx.backend.dim} 维) | 向量库: {idx.vec_db.name}")
+        print(f"已建向量: {total} | 应建事实(active/disputed): {n_facts} | 覆盖 {total}/{n_facts}")
+        if total < n_facts:
+            print(f"  ⚠ 缺 {n_facts - total} 条未建，跑 `./tkb semantic build` 增量补。")
+    else:  # build
+        print(f"▶ 增量建索引(后端 {idx.backend.name}/{idx.backend.dim}维，应建 {n_facts} 条)…"
+              "大库首次较慢，请耐心。", flush=True)
+        n = idx.build(facts)
+        total = idx._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        print(f"✓ 新增 {n} 条向量，索引共 {total} 条 → {idx.vec_db}")
+    facts.close()
+
+
+def _build_data_tools() -> dict:
+    """尽力接入 tdx(行情)/ifind(财务)作为 deep_ask 工具;接不上则该工具缺省提示未接入。"""
+    tools: dict = {}
+    try:
+        sys.path.insert(0, str(Path.home() / "tdx"))
+        from tdx import TdxData
+        _t = TdxData()
+        tools["quote"] = lambda code: str(_t.quote(code))[:600]
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(Path.home()))
+        from ifind_ft import iFindFT
+        _ft = iFindFT()
+
+        def _fin(code: str) -> str:
+            c = code if "." in code else (f"{code}.SH" if code[:1] == "6" else f"{code}.SZ")
+            df = _ft.hxds(c, ["ths_revenue_stock"], "2025-01-01", "2026-03-31",
+                          interval="Q", days="Alldays")
+            return df.to_string()[:600] if hasattr(df, "to_string") else str(df)
+        tools["finance"] = _fin
+    except Exception:
+        pass
+    return tools
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="trading_kb")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -277,6 +418,7 @@ def main(argv=None) -> int:
     pa = sub.add_parser("ask", help="六段式问答")
     pa.add_argument("query")
     pa.add_argument("--audit", action="store_true", help="含历史/反证(include_invalidated)")
+    pa.add_argument("--semantic", action="store_true", help="强制语义召回(较慢，扩召回相关标的)")
     pa.set_defaults(func=cmd_ask)
 
     ps = sub.add_parser("stats", help="三层规模统计")
@@ -298,6 +440,35 @@ def main(argv=None) -> int:
 
     pd = sub.add_parser("sentiment-demo", help="舆情轻 lane 演示")
     pd.set_defaults(func=cmd_sentiment_demo)
+
+    ph = sub.add_parser("hyp", help="假设追踪:new/list/show/evidence/resolve(P1)")
+    ph.add_argument("action", choices=["new", "list", "show", "evidence", "resolve"])
+    ph.add_argument("text", nargs="?", default="", help="new:标题 / 其余:假设ID")
+    ph.add_argument("--ticker", default="", help="标的代码(new)")
+    ph.add_argument("--statement", default="", help="假设详述(new)")
+    ph.add_argument("--ev", default="", help="证据/结论内容(evidence/resolve)")
+    ph.add_argument("--side", choices=["for", "against"], default="for")
+    ph.add_argument("--grade", default="C", help="证据成色 A/B+/B/C/D")
+    ph.add_argument("--verdict", choices=["confirmed", "refuted", "partial"], default="partial")
+    ph.set_defaults(func=cmd_hyp)
+
+    pfr = sub.add_parser("friction", help="记一条摩擦日志(驱动系统改进)")
+    pfr.add_argument("text")
+    pfr.set_defaults(func=cmd_friction)
+
+    pdb = sub.add_parser("debate", help="真多空对抗辩论(P2，需 TKB_USE_LLM=1)")
+    pdb.add_argument("query")
+    pdb.set_defaults(func=cmd_debate)
+
+    pdp = sub.add_parser("deep", help="真 agent loop 深度研究(P2，需 TKB_USE_LLM=1)")
+    pdp.add_argument("query")
+    pdp.set_defaults(func=cmd_deep)
+
+    psm = sub.add_parser("semantic", help="语义索引:build 增量建向量 / status 看覆盖(P0.5)")
+    psm.add_argument("action", choices=["build", "status"])
+    psm.add_argument("--prefer", choices=["bge", "model2vec"], default=None,
+                     help="强制后端(默认自动择优:bge>model2vec)")
+    psm.set_defaults(func=cmd_semantic)
 
     args = p.parse_args(argv)
     args.func(args)

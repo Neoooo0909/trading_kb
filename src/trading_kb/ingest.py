@@ -11,6 +11,7 @@ from typing import Optional
 from . import config
 from .classify import classify_finding, predicate_for, relation_for
 from .critique import CritiqueEngine
+from .entity_quality import attribute_subject, is_garbage_entity
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .grade import grade_fact
@@ -66,11 +67,13 @@ class ResearchIngestor:
 
     def ingest_finding(self, f: Finding, report: IngestReport,
                        code_map: dict | None = None,
-                       card_entity_names: list[str] | None = None) -> None:
+                       card_entity_names: list[str] | None = None,
+                       card: dict | None = None) -> None:
         """单条 finding 全流程:分流 → 成色 → 归一 → 入图。
 
         code_map: 卡片级 实体名→证券代码,用于把硬事实主语锚到真实代码(N6)。
         card_entity_names: 卡片级实体名,供结构关系补全第二端(C3)。
+        card: 源卡片,供主体归属(点名匹配 / title 锚定主导主体,治未知主体)。
         """
         cat = classify_finding(f, llm=self.llm_classify)
 
@@ -83,10 +86,10 @@ class ResearchIngestor:
             return
 
         # hard_fact / quant_fact → facts_store
-        self._ingest_fact(f, cat, report, code_map or {})
+        self._ingest_fact(f, cat, report, code_map or {}, card=card)
 
     def _ingest_fact(self, f: Finding, cat: str, report: IngestReport,
-                     code_map: dict) -> None:
+                     code_map: dict, card: dict | None = None) -> None:
         """硬事实/量化事实入时序事实层。"""
         if cat == "quant_fact":
             predicate = "HAS_FACTOR_PERFORMANCE"
@@ -98,7 +101,7 @@ class ResearchIngestor:
         # 主语取首个实体,优先用卡片级 code 锚定真实证券代码(N6)
         # A3:不再因 cat==hard_fact 就强制 stock(避免"上交所/监管机构"被错挂股票);
         #     只有拿到股票 code 才按股票归一,否则按概念。
-        subject = f.entities[0] if f.entities else (f.broker or "未知主体")
+        subject = _pick_subject(f, card or {})
         code = code_map.get(_normalize(subject))
         etype = "stock" if code else "concept"
         cid = self.registry.resolve(subject, type_=etype, stock_code=code)
@@ -204,8 +207,22 @@ class ResearchIngestor:
         for f in card_to_findings(card):
             report.findings += 1
             self.ingest_finding(f, report, code_map=code_map,
-                                card_entity_names=card_entity_names)
+                                card_entity_names=card_entity_names, card=card)
         report.cards += 1
+
+
+def _pick_subject(f: Finding, card: dict) -> str:
+    """选论断主语(治本·多病同治,精度优先)。
+
+    ① 跳过垃圾实体取首个真实体——治"垃圾实体当主语"。
+    ② 无可用实体 → attribute_subject(免责剔除 / 点名匹配 / title 锚定主导主体,且关系/指代论断
+       不走点名匹配以免方向性挂反)——治未知主体主力。③ 再退 broker;④ 最后未知主体。
+    """
+    for e in (f.entities or []):
+        if isinstance(e, str) and e.strip() and not is_garbage_entity(e, "concept"):
+            return e
+    named = attribute_subject(f"{f.claim} {getattr(f, 'evidence', '')}", card or {})
+    return named or f.broker or "未知主体"
 
 
 def _kind_to_type(kind: str) -> str:

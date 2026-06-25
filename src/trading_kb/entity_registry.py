@@ -12,7 +12,11 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from .entity_quality import is_garbage_entity
 from .models import _normalize
+
+# 垃圾实体(日期/纯数值/法条/地域/通用词)登记时一律归到此主键,不污染注册表
+UNKNOWN_CID = "concept:未知主体"
 
 
 class EntityRegistry:
@@ -51,7 +55,13 @@ class EntityRegistry:
     # ── 写入 ──────────────────────────────────────────────────────────────
     def register(self, name: str, type_: str = "concept",
                  stock_code: Optional[str] = None, source: str = "ingest") -> str:
-        """登记一个实体,返回 canonical_id。重复登记幂等。"""
+        """登记一个实体,返回 canonical_id。重复登记幂等。
+
+        垃圾实体闸(治本):无股票代码且名字是日期/纯数值/法条/地域市场/通用词时,
+        不登记、直接归到 UNKNOWN_CID(未知主体),从源头杜绝注册表污染。
+        """
+        if not stock_code and is_garbage_entity(name, type_):
+            return UNKNOWN_CID
         cid = self._canonical_id(name, type_, stock_code)
         # A2:INSERT OR IGNORE 消除 SELECT-then-INSERT 的并发竞态
         self.conn.execute(

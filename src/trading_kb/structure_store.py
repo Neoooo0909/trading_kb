@@ -49,22 +49,45 @@ class StructureStore:
             "SELECT * FROM relations WHERE rel_id=?", (rel.rel_id,)
         ).fetchone()
         if existing is None:
-            self.conn.execute(
-                """INSERT INTO relations(rel_id,src,rel_type,dst,support_count,sources,low_confidence)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (rel.rel_id, rel.src, rel.rel_type, rel.dst, len(set(rel.sources)) or 1,
-                 json.dumps(sorted(set(rel.sources)), ensure_ascii=False),
-                 int(len(set(rel.sources)) < 2)),
+            try:
+                self.conn.execute(
+                    """INSERT INTO relations(rel_id,src,rel_type,dst,support_count,sources,low_confidence)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (rel.rel_id, rel.src, rel.rel_type, rel.dst, len(set(rel.sources)) or 1,
+                     json.dumps(sorted(set(rel.sources)), ensure_ascii=False),
+                     int(len(set(rel.sources)) < 2)),
+                )
+                self.conn.commit()
+                return rel.rel_id
+            except sqlite3.IntegrityError:
+                # 并发竞态修复(TOCTOU):另一连接抢先插入同 rel_id,回滚后落到合并路径。
+                self.conn.rollback()
+                existing = self.conn.execute(
+                    "SELECT * FROM relations WHERE rel_id=?", (rel.rel_id,)
+                ).fetchone()
+                if existing is None:
+                    raise
+        # 乐观并发:UPDATE 带 `sources=旧值` 条件,被抢改则重读重试,防跨连接 lost-update。
+        # `or 1`:两侧 sources 均空时 merged=[] 不应把已存在关系的 support_count 覆盖为 0
+        # (与 INSERT 路径的 `len(...) or 1` 口径一致,避免 ORDER BY support_count 把它沉底)。
+        for _ in range(8):
+            old_sources_json = existing["sources"]
+            merged = sorted(set(json.loads(old_sources_json or "[]") + rel.sources))
+            cur = self.conn.execute(
+                "UPDATE relations SET support_count=?, sources=?, low_confidence=? "
+                "WHERE rel_id=? AND sources=?",
+                (len(merged) or 1, json.dumps(merged, ensure_ascii=False),
+                 int(len(merged) < 2), rel.rel_id, old_sources_json),
             )
-        else:
-            merged = sorted(set(json.loads(existing["sources"]) + rel.sources))
-            self.conn.execute(
-                "UPDATE relations SET support_count=?, sources=?, low_confidence=? WHERE rel_id=?",
-                (len(merged), json.dumps(merged, ensure_ascii=False),
-                 int(len(merged) < 2), rel.rel_id),
-            )
-        self.conn.commit()
-        return rel.rel_id
+            self.conn.commit()
+            if cur.rowcount:
+                return rel.rel_id
+            existing = self.conn.execute(
+                "SELECT * FROM relations WHERE rel_id=?", (rel.rel_id,)
+            ).fetchone()
+            if existing is None:
+                return self.upsert(rel)
+        raise sqlite3.OperationalError("relations.upsert 合并乐观重试 8 次仍冲突(并发异常)")
 
     def neighbors(self, node: str, rel_type: str | None = None) -> list[dict]:
         """查某实体的产业链邻居(双向)。拆解行业用。"""
