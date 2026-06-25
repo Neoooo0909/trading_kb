@@ -179,7 +179,7 @@ class AskEngine:
             sup = min(f.get("support_count") or 0, 10) / 10.0
             scored.append((relevance * 2.0 + level + rec + sup * 0.5, f))
         scored.sort(key=lambda x: -x[0])
-        return [f for _, f in scored]
+        return _diversify_by_kind(scored)
 
     def _semantic_index(self):
         """取共享本地语义索引(P0-b)；未装 embedding / 无索引时返回 None(优雅降级)。"""
@@ -256,6 +256,37 @@ class AskEngine:
                 scored.append((score, f["support_count"], f))
         scored.sort(key=lambda x: (-x[0], -x[1]))
         return [f for _, _, f in scored[:limit]]
+
+
+def _diversify_by_kind(scored: list) -> list:
+    """证据链按 source_kind 轮转,**防单一来源类型垄断头部**。
+
+    治本病:纯股票名查询(如"精智达")下所有事实 ent_hit 打平,A 级官方公告靠 level(=1.0)+时效
+    把 B 级券商研报的**投资逻辑**(龙头地位/订单/产能)挤出 active[:8] 证据链——用户看到一堆程序性
+    公告,真正有价值的研报论断反被 LLM 综合成"待验证"丢弃。这是把"证据确凿度"误当"信息价值"。
+    本函数让研报/公告/社媒**都进证据链前排**:保分数序(out[0] 仍是全局最高分,不破坏 recency 测试),
+    每轮各非空来源类按其当前头部分数降序各取一条,使第二高价值来源的最佳论断顶到 F2。
+
+    scored: 已按 score 降序的 [(score, fact), ...]。
+    """
+    from collections import OrderedDict
+    groups: "OrderedDict[str, list]" = OrderedDict()
+    for s, f in scored:
+        groups.setdefault(f.get("source_kind") or "?", []).append((s, f))
+    if len(groups) <= 1:                      # 单一来源类型,无需轮转
+        return [f for _, f in scored]
+    out = []
+    while any(groups.values()):
+        # 本轮:每个非空来源类各出一条。类间排序键 =(成色层, -分数):
+        # 成色层 0=高信息价值(A 公告 / B·B+ 研报),1=低成色(C 社媒 / D 碎片)——
+        # 让券商研报投资逻辑与官方公告优先进前排,C 级谣言不抢 B 级研报的位置;层内按分数。
+        def _key(k):
+            s, f = groups[k][0]
+            tier = 0 if f.get("evidence_level") in ("A", "B+", "B") else 1
+            return (tier, -s)
+        for k in sorted((k for k in groups if groups[k]), key=_key):
+            out.append(groups[k].pop(0)[1])
+    return out
 
 
 def _is_security(cid) -> bool:

@@ -50,6 +50,35 @@ def test_recency_lifts_new_over_old(tmp_registry, tmp_facts, tmp_structure):
     assert res.facts[0].get("valid_at", "") >= "2026-01-01"   # top 不是 2025 老研报
 
 
+def test_research_not_buried_by_announcements(tmp_registry, tmp_facts, tmp_structure):
+    """纯股票名查询:B 级券商研报(投资逻辑)不被一堆 A 级程序性公告挤出证据链头部。
+
+    锚定"看下精智达只返回公告、研报论断被埋"的翻车:source_kind 轮转 + 成色分层,
+    保证研报与公告都进前排,C 级社媒不抢 B 级研报位置。
+    """
+    cid = tmp_registry.register("精智达", type_="company", stock_code="688627")
+    # 5 条 A 级最新公告(程序性、高确凿但低信息价值)
+    for i in range(5):
+        tmp_facts.upsert(Fact(subject="精智达", predicate="ANNOUNCE", object=f"公告{i}",
+                              canonical_id=cid, claim=f"精智达程序性公告{i}",
+                              evidence_level="A", source_kind="official_announcement",
+                              valid_at="2026-06-18", sources=[f"a{i}"]))
+    # 2 条 B 级券商研报(投资逻辑,稍旧)
+    tmp_facts.upsert(Fact(subject="精智达", predicate="HAS_TECH", object="存储测试龙头",
+                          canonical_id=cid, claim="精智达存储测试设备业务快速放量成为核心增长引擎",
+                          evidence_level="B", source_kind="broker_research",
+                          valid_at="2026-03-01", sources=["b1"]))
+    tmp_facts.upsert(Fact(subject="精智达", predicate="HAS_ORDER", object="长鑫份额",
+                          canonical_id=cid, claim="长鑫扩产精智达有望获50%份额20亿增量",
+                          evidence_level="B", source_kind="broker_research",
+                          valid_at="2026-03-01", sources=["b2"]))
+    res = AskEngine(tmp_registry, tmp_facts, tmp_structure).ask("精智达")
+    head = res.facts[:4]                                   # 证据链头部 4 条
+    kinds = [f.get("source_kind") for f in head]
+    assert "broker_research" in kinds                      # 研报必须进前 4(旧版会被 5 条公告压到第 6+)
+    assert "official_announcement" in kinds                # 公告也在(不是反向垄断)
+
+
 def test_evidence_level_order_fixed(tmp_facts):
     """query 默认成色排序:A 在 D 前(修字符串 DESC 把 D 排前的 bug)。"""
     for lvl in ["D", "A", "C", "B"]:
