@@ -45,15 +45,17 @@ class AskResult:
         else:
             lines.append("(无 active 事实,见下方分歧/反证)")
 
-        # 证据链(带成色编号 + 质疑图标)
+        # 证据链(带成色编号 + 质疑图标)——完整展现全部相关事实,不截断
+        # (relevance<=0 的无关项已在 _rank_facts 过滤;此处不再二次截断,
+        #  否则会把按成色轮转上来的研报投资逻辑又砍掉。)
         lines.append("\n## 证据链")
-        for i, f in enumerate(active[:8], 1):
+        for i, f in enumerate(active, 1):
             dmark = _doubt_icon(f)
             lines.append(f"[F{i}] {_grade_tag(f)}{dmark} {f['claim']}  "
                          f"(来源{f['support_count']}篇, 数字校验{_vn(f)})")
 
-        # 质疑提示(批判性体检:无出处/过于乐观/回测软肋)
-        doubt_items = [(i, f) for i, f in enumerate(active[:8], 1) if _doubts(f)]
+        # 质疑提示(批判性体检:无出处/过于乐观/回测软肋)——覆盖全部证据
+        doubt_items = [(i, f) for i, f in enumerate(active, 1) if _doubts(f)]
         if doubt_items:
             lines.append("\n## ⚠ 质疑提示")
             lines.append("（自动批判性体检，提醒别全信；不代表结论一定错）")
@@ -87,10 +89,10 @@ class AskResult:
         lines.append("\n## 交易含义")
         lines.append("(由上层 LLM 结合成色与反证综合;低成色/待验证项不应作为独立买点)")
 
-        # 引用来源
+        # 引用来源——列全部去重来源(原 [:12] 截断会把研报卡按字典序挤掉、只剩公告卡)
         lines.append("\n## 引用来源")
         srcs = sorted({s for f in active for s in _sources(f)})
-        for s in srcs[:12]:
+        for s in srcs:
             lines.append(f"- report_lab card: {s}")
 
         if self.warnings:
