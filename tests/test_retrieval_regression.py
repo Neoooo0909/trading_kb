@@ -79,6 +79,43 @@ def test_research_not_buried_by_announcements(tmp_registry, tmp_facts, tmp_struc
     assert "official_announcement" in kinds                # 公告也在(不是反向垄断)
 
 
+def test_cross_security_noise_filtered(tmp_registry, tmp_facts, tmp_structure):
+    """查个股A时,丢"挂在另一只证券上、正文不点名A"的同形碰撞噪音(金智达⊂"智达"),
+    但保留正文点名A的概念/关系事实。"""
+    cidA = tmp_registry.register("精智达", type_="company", stock_code="688627")
+    cidB = tmp_registry.register("金智达", type_="company")        # 另一证券实体(company:)
+    tmp_facts.upsert(Fact(subject="金智达", predicate="P", object="存储测试",
+                          canonical_id=cidB, claim="金智达一季报营收增长118%",
+                          evidence_level="B", source_kind="broker_research", sources=["b"]))
+    tmp_facts.upsert(Fact(subject="精智达", predicate="P", object="订单",
+                          canonical_id=cidA, claim="精智达存储测试订单放量",
+                          evidence_level="B", source_kind="broker_research", sources=["a"]))
+    tmp_facts.upsert(Fact(subject="英伟达", predicate="DRIVES", object="精智达",
+                          canonical_id="concept:英伟达", claim="英伟达拉动精智达需求",
+                          evidence_level="C", source_kind="social_research", sources=["c"]))
+    res = AskEngine(tmp_registry, tmp_facts, tmp_structure).ask("精智达")
+    claims = [f["claim"] for f in res.facts]
+    assert any("精智达存储测试" in c for c in claims)              # A 自有事实在
+    assert any("英伟达拉动精智达" in c for c in claims)            # 概念关系事实(正文含A名)在
+    assert not any("金智达" in c for c in claims)                 # 另一证券噪音被滤除
+
+
+def test_fuzzy_typo_maps_to_listed_security(tmp_registry, tmp_facts, tmp_structure):
+    """查无此实体时,同长度差1字的【唯一】已上市标的纠错(精志达→精智达);
+    已注册的不同公司(金智达)解析到自己,绝不被纠错并走。"""
+    cid = tmp_registry.register("精智达", type_="stock", stock_code="688627")  # → SH688627 码型
+    tmp_facts.upsert(Fact(subject="精智达", predicate="P", object="订单",
+                          canonical_id=cid, claim="精智达订单放量", evidence_level="B", sources=["a"]))
+    eng = AskEngine(tmp_registry, tmp_facts, tmp_structure)
+    assert eng._fuzzy_security("精志达") == cid                   # 笔误→纠错到 SH688627
+    res = eng.ask("精志达")
+    assert res.canonical_id == cid
+    assert any("精智达订单" in f["claim"] for f in res.facts)
+    assert any("纠错" in w for w in res.warnings)                # 透明告警
+    cidB = tmp_registry.register("金智达", type_="company")       # 注册的不同公司
+    assert eng.ask("金智达").canonical_id == cidB                 # 解析到自己,不被纠错
+
+
 def test_evidence_level_order_fixed(tmp_facts):
     """query 默认成色排序:A 在 D 前(修字符串 DESC 把 D 排前的 bug)。"""
     for lvl in ["D", "A", "C", "B"]:

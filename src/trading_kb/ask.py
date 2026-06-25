@@ -121,7 +121,18 @@ class AskEngine:
         """
         result = AskResult(query=query)
         cid = self._locate_entity(query)
+        if cid is None:                            # 查无此实体 → 保守字形纠错(精志达→精智达)
+            fz = self._fuzzy_security(_normalize(query))
+            if fz:
+                cid = fz
+                result.warnings.append(f"查询疑似字形笔误,已纠错到最接近的已上市标的 {cid}")
         result.canonical_id = cid or ""
+        # 本实体的全部别名(仅证券查询):用于过滤跨证券噪音(见 _rank_facts)
+        ent_aliases = set()
+        if cid and _is_security(cid):
+            ent_aliases = {r["alias_norm"] for r in self.registry.conn.execute(
+                "SELECT alias_norm FROM aliases WHERE canonical_id=?", (cid,)).fetchall()
+                if r["alias_norm"]}
         # 语义召回触发:无实体 **或** 定位到的是非证券概念(发现型/topic 查询)。治"存储测试设备龙头"
         # 锚到 concept 后跳过语义、池里只剩字面"存储"的募资公告、高语义的龙头股(精智达)进不来。
         # 个股/公司命中走精准快路径(其自有事实已准),不跑较重的语义召回。
@@ -136,7 +147,8 @@ class AskEngine:
         if want_sem:
             pool = _merge_facts(pool, self._semantic_recall(query, top_k=120))
 
-        result.facts = self._rank_facts(query, pool, cid, use_semantic=want_sem)
+        result.facts = self._rank_facts(query, pool, cid, use_semantic=want_sem,
+                                        ent_aliases=ent_aliases)
 
         if cid and include_invalidated:
             allf = self.facts.query(canonical_id=cid, include_invalidated=True, limit=120)
@@ -151,7 +163,7 @@ class AskEngine:
         return result
 
     def _rank_facts(self, query: str, facts: list[dict], cid,
-                    use_semantic: bool = False) -> list[dict]:
+                    use_semantic: bool = False, ent_aliases: set | None = None) -> list[dict]:
         """综合加权排序(P0):相关度为主，成色×时效×来源数为辅。
 
         relevance = 字面覆盖率 + 实体精确命中(强信号) + 语义相似(P0-b/P0.5 注入)，三项同量纲。
@@ -161,6 +173,8 @@ class AskEngine:
         字面项归一为"覆盖率"(命中 gram / query gram 数，0~1)而非裸重叠数：裸数无上界，
         长 claim 命中十几个 gram 会把语义满分(≤2)和实体命中(=2)压到后面，使 P0.5 语义召回
         捞进来的、字面不同但语义相关的事实在排序阶段被沉底，语义价值被抵消。
+
+        ent_aliases:本实体(证券)全部别名;非空时启用跨证券噪音过滤(见循环内)。
         """
         from datetime import date as _Date
         qg = _content_grams(query)
@@ -169,9 +183,19 @@ class AskEngine:
         sem = self._semantic_scores(query, facts) if use_semantic else {}   # 仅按需调语义
         scored = []
         for f in facts:
+            fcid = f.get("canonical_id")
+            ent_hit = 1.0 if (cid and fcid == cid) else 0.0
+            # 跨证券噪音过滤:查个股A时,丢"挂在【另一只证券实体】上、且正文不点名A"的事实。
+            # 治"金智达/芯智达因共享 2-gram(智达)被关键词召回进精智达证据链"——它们既非A自有
+            # 事实(ent_hit=0)、cid 又是别的证券(company:金智达 / company:neuralink)、正文也不含A
+            # 任一别名 → 是同形碰撞噪音。概念/关系事实(cid=concept:英伟达,正文含"精智达")不受影响:
+            # 其 cid 非证券,不触发本过滤。
+            if ent_aliases and not ent_hit and _is_security(fcid):
+                ftext = _normalize(f"{f.get('claim','')}{f.get('object','')}{f.get('subject','')}")
+                if not any(a in ftext for a in ent_aliases):
+                    continue
             fg = _content_grams(f"{f.get('claim','')} {f.get('object','')}")
             rel = len(qg & fg) / nq                         # 字面覆盖率 0~1(归一防长 claim 压垮语义)
-            ent_hit = 1.0 if (cid and f.get("canonical_id") == cid) else 0.0
             sscore = sem.get(f.get("fact_id"), 0.0)
             relevance = 1.5 * rel + 2.0 * ent_hit + 2.0 * sscore   # 字面/实体/语义同量纲可比
             if relevance <= 0:
@@ -242,6 +266,28 @@ class AskEngine:
         if sec:
             return max(sec, key=lambda m: len(m[0]))[1]    # 最长合格证券
         return max(matches, key=lambda m: len(m[0]))[1]    # 无合格证券 → 最长匹配(任意类型)
+
+    def _fuzzy_security(self, qn: str):
+        """查无此实体时的【保守】字形纠错:仅当 qn 与**唯一**一只已上市标的(SH/SZ/BJ 码)的别名
+        **同长度且恰差 1 个字**时,纠错到它。
+
+        精志达→精智达(688627)成立;而金智达/芯智达本就注册成各自实体(_locate_entity 已命中),
+        根本走不到这里——故绝不会把真实存在的不同公司模糊并过来(precision 铁律)。歧义(差1字的
+        标的≥2)或差≥2字一律返回 None,不猜。只纠错到真上市码(不纠到 company:/concept:,更稳)。
+        """
+        if not (2 <= len(qn) <= 8):
+            return None
+        rows = self.registry.conn.execute(
+            "SELECT alias_norm, canonical_id FROM aliases WHERE LENGTH(alias_norm)=?", (len(qn),)
+        ).fetchall()
+        hits = set()
+        for r in rows:
+            a, cid = r["alias_norm"], r["canonical_id"]
+            if not re.match(r"^(SH|SZ|BJ)\d", cid or ""):          # 仅纠错到真上市码
+                continue
+            if a != qn and sum(1 for x, y in zip(a, qn) if x != y) == 1:   # 同长度恰差1字
+                hits.add(cid)
+        return next(iter(hits)) if len(hits) == 1 else None
 
     def _keyword_facts(self, query: str, limit: int = 20) -> list[dict]:
         """关键词检索:B2 改为 gram 重叠打分(无 jieba 也能处理无空格中文)。"""
