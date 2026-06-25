@@ -185,12 +185,12 @@ class AskEngine:
         for f in facts:
             fcid = f.get("canonical_id")
             ent_hit = 1.0 if (cid and fcid == cid) else 0.0
-            # 跨证券噪音过滤:查个股A时,丢"挂在【另一只证券实体】上、且正文不点名A"的事实。
-            # 治"金智达/芯智达因共享 2-gram(智达)被关键词召回进精智达证据链"——它们既非A自有
-            # 事实(ent_hit=0)、cid 又是别的证券(company:金智达 / company:neuralink)、正文也不含A
-            # 任一别名 → 是同形碰撞噪音。概念/关系事实(cid=concept:英伟达,正文含"精智达")不受影响:
-            # 其 cid 非证券,不触发本过滤。
-            if ent_aliases and not ent_hit and _is_security(fcid):
+            # 跨实体噪音过滤:查个股A时,丢"非A自有事实(ent_hit=0)且正文不点名A任一别名"的项。
+            # 治共享 2-gram 的同形碰撞被关键词召回——如查"精智达"混进金智达(cid=company:金智达),
+            # 查"臻宝科技"混进胜宏科技(cid=concept:胜宏科技,共享"科技")。不限 cid 类型:概念/关系事实
+            # (cid=concept:英伟达,正文含"精智达")因正文点名A而保留;纯 gram 碰撞噪音(正文无A)被清。
+            # 仅证券查询触发(ent_aliases 仅证券非空);非证券/发现型查询走语义,不做此过滤。
+            if ent_aliases and not ent_hit:
                 ftext = _normalize(f"{f.get('claim','')}{f.get('object','')}{f.get('subject','')}")
                 if not any(a in ftext for a in ent_aliases):
                     continue
