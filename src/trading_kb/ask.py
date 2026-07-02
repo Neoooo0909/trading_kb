@@ -26,6 +26,7 @@ class AskResult:
     invalidated_facts: list[dict] = field(default_factory=list)
     neighbors: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    env: object = None                          # C·环境重估快照(EnvSnapshot);默认离线时为 None
 
     def to_six_section(self) -> str:
         """渲染六段式骨架(证据不足时显式提示)。"""
@@ -85,9 +86,21 @@ class AskResult:
         else:
             lines.append("(主要事实已有信源基线;高价值结论建议仍交叉验证)")
 
+        # 环境重估(C):有实时快照时插在交易含义前,让 LLM 的重估锚在当前坐标系(非悬空)
+        if self.env is not None:
+            try:
+                from .revalue import render_section
+                lines.append(render_section(self.env, active))
+            except Exception:
+                pass
+
         # 交易含义
         lines.append("\n## 交易含义")
-        lines.append("(由上层 LLM 结合成色与反证综合;低成色/待验证项不应作为独立买点)")
+        lines.append("(由上层 LLM 结合成色×时效综合;成色=可靠性、时效=对当下相关性,分开判断:"
+                     "老高成色口径过时则权重下调,新低成色若实质影响当下应积极纳入并交叉验证;"
+                     "仅低成色且已被反证或无独立佐证的孤证不应作独立买点。"
+                     "若上方有🌡环境重估段,须先认其'当前定价框架',据此决定个股基本面(尤其快变量)"
+                     "对当前股价的权重——框架为beta/主题/困境反转时,勿把过期或非主导的基本面当买卖点)")
 
         # 引用来源——列全部去重来源(原 [:12] 截断会把研报卡按字典序挤掉、只剩公告卡)
         lines.append("\n## 引用来源")
@@ -110,7 +123,7 @@ class AskEngine:
         self.structure = structure
 
     def ask(self, query: str, include_invalidated: bool = False,
-            use_semantic=None) -> AskResult:
+            use_semantic=None, revalue=None, peers=None) -> AskResult:
         """检索:实体定位 + 文本/语义召回 → 统一(相关度×成色×时效)加权排序(P0)。
 
         候选池 = 实体命中事实 ∪ facts.search(SQL LIKE 预筛，根治旧版只扫前 2000 的召回坍缩)
@@ -160,6 +173,21 @@ class AskEngine:
             result.warnings.append("未定位到具体实体,且关键词/语义无命中")
         if not result.facts and not result.neighbors:
             result.warnings.append("证据不足:无匹配事实/关系")
+
+        # C·环境重估:默认关(离线可复现),TKB_REVALUE=1 或 revalue=True 且命中证券时启用。
+        # 拉实时量价/估值构建环境快照,失败静默降级(不阻断问答)。
+        want_rev = revalue
+        if want_rev is None:
+            from . import config
+            want_rev = getattr(config, "USE_REVALUE", False)
+        if want_rev and cid and _is_security(cid):
+            try:
+                from .revalue import build_env
+                result.env = build_env(cid, result.facts, peers=peers)
+                if result.env is None:
+                    result.warnings.append("环境重估:实时量价/估值取数失败,已跳过")
+            except Exception as e:
+                result.warnings.append(f"环境重估异常已跳过:{type(e).__name__}")
         return result
 
     def _rank_facts(self, query: str, facts: list[dict], cid,

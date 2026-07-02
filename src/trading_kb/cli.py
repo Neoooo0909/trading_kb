@@ -43,16 +43,45 @@ def cmd_ask(args) -> None:
     facts = FactsStore(config.FACTS_DB)
     structure = StructureStore(config.STRUCTURE_DB)
     engine = AskEngine(reg, facts, structure)
+    _peers = [p.strip() for p in (getattr(args, "peers", "") or "").split(",") if p.strip()]
     res = engine.ask(args.query, include_invalidated=args.audit,
-                     use_semantic=(True if getattr(args, "semantic", False) else None))
+                     use_semantic=(True if getattr(args, "semantic", False) else None),
+                     revalue=(True if getattr(args, "revalue", False) else None),
+                     peers=_peers or None)
     six = res.to_six_section()
+
+    # 时效线索自动交叉核验(仅 USE_WEB 时联网,尊重默认离线可复现):挑新鲜+低成色+实质的
+    # 线索拉公告比对可靠性,结论既贴进骨架、也喂给合成层——让"康宁 MOU"这类新边际拿到独立
+    # 核实结论(corroborated/not_disclosed/contradicted),而非空标一个 C 级。被公告打脸→disputed。
+    verify_block = ""
+    if config.USE_WEB:
+        from datetime import date as _date
+        from .deep_verify import auto_verify_fresh
+        pairs = auto_verify_fresh(res.facts, _date.today().toordinal())   # 默认 max_n=5,按事件去重
+        if pairs:
+            vl = ["## 🔎 时效线索·交叉核验(联网公告)"]
+            for f, v, n in pairs:
+                merged = f"（合并 {n} 条同事件，取最佳佐证）" if n > 1 else ""
+                vl.append(f"- {f['claim'][:48]}  [{f.get('evidence_level')}级/{f.get('valid_at')}]{merged}")
+                vl.append(f"    {v.tag()}")
+                if v.matched_title:
+                    vl.append(f"    对应公告:[{v.matched_category}] {v.matched_title[:40]}")
+                if v.status == "contradicted":
+                    facts.mark_disputed(f["fact_id"])
+                    vl.append("    → 已标记 disputed(与公告相悖)")
+            verify_block = "\n".join(vl)
+
     if config.USE_LLM:                       # C：Sonnet 合成自然语言回答
         from .llm import synthesize_answer
-        ans = synthesize_answer(args.query, six)
+        # 核验结论前置:确保不被 material 截断,且作为最新已核实信号被合成层重点纳入
+        material = (verify_block + "\n\n" + six) if verify_block else six
+        ans = synthesize_answer(args.query, material)
         if ans:
             print(ans)
             print("\n" + "─" * 60 + "\n## 📎 检索材料(六段骨架)\n")
     print(six)
+    if verify_block:
+        print("\n" + verify_block)
     reg.close(); facts.close(); structure.close()
 
 
@@ -419,6 +448,10 @@ def main(argv=None) -> int:
     pa.add_argument("query")
     pa.add_argument("--audit", action="store_true", help="含历史/反证(include_invalidated)")
     pa.add_argument("--semantic", action="store_true", help="强制语义召回(较慢，扩召回相关标的)")
+    pa.add_argument("--revalue", action="store_true",
+                    help="C·环境感知重估:拉实时量价/估值,把事实放进当前定价框架(联网,较慢)")
+    pa.add_argument("--peers", default="",
+                    help="同业池(逗号分隔证券码,如 002371,688082),用于算相对同业α分离板块beta")
     pa.set_defaults(func=cmd_ask)
 
     ps = sub.add_parser("stats", help="三层规模统计")

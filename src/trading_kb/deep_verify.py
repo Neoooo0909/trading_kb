@@ -94,12 +94,15 @@ def cross_check(claim: str, predicate: str, docs: list[dict],
                        note=f"「{cat}」公告与说法一致 → 获官方披露佐证")
 
 
-def deep_verify_fact(fact: dict, fetch_fn: Optional[Callable] = None) -> DeepVerdict:
+def deep_verify_fact(fact: dict, fetch_fn: Optional[Callable] = None,
+                     allow_soft: bool = False) -> DeepVerdict:
     """对一条事实做深度核对。fact 为 facts_store.query 返回的 dict。
 
     fetch_fn(code, category)->list[dict];默认用 announcement.fetch_with_text(联网)。
+    allow_soft=True 时放开 hard_fact 限制,允许核 quant_fact/structure——供 ask 自动核验
+    新鲜低成色线索(如康宁 MOU 多挂 quant_fact/structure 而非 hard_fact),否则会被一刀切跳过。
     """
-    if fact.get("category") != "hard_fact":
+    if not allow_soft and fact.get("category") != "hard_fact":
         return DeepVerdict("not_applicable", note="非硬事实,不做公告核对")
     code = code_from_canonical(fact.get("canonical_id", ""))
     if not code:
@@ -124,3 +127,86 @@ def _default_fetch(code: str, category: str) -> list[dict]:
         return docs
     except Exception:
         return []
+
+
+def _event_grams(claim: str, subject: str = "") -> set:
+    """事件归一 gram:剥结构事实的关系前缀「实体」（极性）：、英中名与 MOU 同义归一、去主体名,
+    使同一桩事件(康宁×京东方×MOU)的不同措辞/关系(SUPPLIES_TO/BENEFITS/DRIVES…)落到相近 gram 集。"""
+    import re
+    m = re.search(r"」（[^）]*）：(.+)$", claim)            # 结构事实:取「实体」（极性）：之后的真正描述
+    core = m.group(1) if m else claim
+    core = core.replace("Corning", "康宁").replace("ＢＯＥ", "京东方").replace("BOE", "京东方")
+    core = re.sub(r"(?i)mou|备忘录", "MOU", core)           # MoU/MOU/备忘录/合作备忘录 归一
+    g = content_grams(core)
+    return (g - content_grams(subject)) if subject else g
+
+
+def _sim(a: set, b: set) -> float:
+    """重叠系数 |a∩b|/min(|a|,|b|):对"短措辞⊂长措辞"更鲁棒(签署MOU后 ⊂ 完整康宁描述)。"""
+    return len(a & b) / min(len(a), len(b)) if (a and b) else 0.0
+
+
+_VERDICT_RANK = {"contradicted": 3, "corroborated": 2, "not_disclosed": 1, "not_applicable": 0}
+
+
+def auto_verify_fresh(facts: list[dict], today_ord: int, *, max_n: int = 5,
+                      max_age_days: int = 120, fetch_fn: Optional[Callable] = None,
+                      sim_threshold: float = 0.3) -> list[tuple]:
+    """挑"新鲜+低成色+实质"的线索,按事件聚类去重,每事件拉一次公告取最佳佐证(供 ask 自动调用)。
+
+    成色≠时效价值:新低成色边际信息(康宁 MOU 等)对当下定价有意义但需独立核实,本函数自动化这步。
+    选取:成色 C/D + valid_at 近 max_age_days 天 + 有证券码 + claim 实质(≥10字)。
+    去重(治本):同股 + 事件 gram 重叠系数≥sim_threshold 视作同一桩事件(康宁的 SUPPLIES_TO/
+      BENEFITS/DRIVES/MOU/合作备忘录 等多条措辞合一),只算一个事件;按新鲜度取前 max_n 个事件。
+    核验:每事件拉一次公告,对其全部措辞各跑 cross_check 取最佳结论(打脸>佐证>存疑——打脸必报、
+      佐证优先于存疑),代表取最新一条措辞。返回 [(代表fact, DeepVerdict, 合并条数), ...](剔 not_applicable)。
+    成本=至多 max_n 次公告拉取(纯文本比对)。
+    """
+    from datetime import date as _Date
+
+    elig = []
+    for f in facts:
+        if f.get("evidence_level") not in ("C", "D"):
+            continue
+        if not code_from_canonical(f.get("canonical_id", "")):
+            continue
+        claim = (f.get("claim") or "").strip()
+        if len(claim) < 10:
+            continue
+        va = f.get("valid_at")
+        if not va:
+            continue
+        try:
+            age = today_ord - _Date.fromisoformat(str(va)[:10]).toordinal()
+        except Exception:
+            continue
+        if age < 0 or age > max_age_days:                 # 太老/日期异常,跳过
+            continue
+        elig.append((age, f, _event_grams(claim, f.get("subject", ""))))
+
+    elig.sort(key=lambda x: x[0])                         # 越新越靠前(代表=事件内最新)
+
+    clusters = []                                         # [{code, sig, rep, members:[fact]}]
+    for _age, f, sig in elig:
+        code = code_from_canonical(f.get("canonical_id", ""))
+        hit = next((cl for cl in clusters
+                    if cl["code"] == code and len(sig & cl["sig"]) >= 3       # 绝对交集地板:防短句病态误并
+                    and _sim(sig, cl["sig"]) >= sim_threshold), None)
+        if hit:
+            hit["members"].append(f)
+        else:
+            clusters.append({"code": code, "sig": sig, "rep": f, "members": [f]})
+
+    fetch = fetch_fn or _default_fetch
+    out = []
+    for cl in clusters[:max_n]:                           # 取最新的 max_n 个事件
+        docs = fetch(cl["code"], "")
+        best_v = None
+        for m in cl["members"]:                           # 同事件全部措辞各核,取最佳结论
+            v = cross_check(m.get("claim", ""), m.get("predicate", ""), docs,
+                            subject=m.get("subject", ""))
+            if best_v is None or _VERDICT_RANK.get(v.status, 0) > _VERDICT_RANK.get(best_v.status, 0):
+                best_v = v
+        if best_v and best_v.status != "not_applicable":
+            out.append((cl["rep"], best_v, len(cl["members"])))
+    return out

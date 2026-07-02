@@ -40,6 +40,11 @@ USE_DATA_VERIFY = os.environ.get("TKB_USE_DATA_VERIFY", "0") == "1"
 # 默认关闭(离线可复现);置 TKB_USE_WEB=1 启用,只采信权威信源(公告/投行/权威媒体)。
 USE_WEB = os.environ.get("TKB_USE_WEB", "0") == "1"
 
+# ── 环境感知重估开关(revalue,C)─────────────────────────────────────────────
+# 默认关闭(离线可复现);置 TKB_REVALUE=1 或 ask --revalue 启用,拉实时量价/估值,
+# 把存量事实放进当前定价框架重估(见 revalue.py)。取数直连 tdx/ifind,失败静默降级。
+USE_REVALUE = os.environ.get("TKB_REVALUE", "0") == "1"
+
 
 def ensure_data_dir() -> None:
     """确保数据目录存在。"""
