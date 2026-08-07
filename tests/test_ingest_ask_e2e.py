@@ -66,3 +66,47 @@ def test_ask_evidence_insufficient(stack):
     res = engine.ask("不存在的标的XYZ")
     out = res.to_six_section()
     assert "证据不足" in out
+
+
+# ── C级情绪面·不同观点(用户要求:C级内容多提炼进结论、标注C级、不设上限)──────────────
+from trading_kb.ask import AskResult, _low_grade_views
+
+
+def _fact(claim, level, status="active"):
+    """构造 to_six_section 所需的最小事实字典。"""
+    return {"status": status, "claim": claim, "evidence_level": level,
+            "unverifiable": 1, "support_count": 1, "extra": "{}", "sources": "[]",
+            "object": "", "subject": ""}
+
+
+def test_c_grade_views_section_rendered_and_positioned():
+    """C级 active 事实存在时:渲染"情绪面·不同观点(C级)"段,且紧贴结论、在证据链之前。"""
+    res = AskResult(query="某标的", facts=[
+        _fact("某标的股东减持结果公告", "A"),
+        _fact("某标的27年新签订单有望翻倍(社媒前瞻)", "C"),
+        _fact("出海送样海外大厂逻辑正式启动", "C"),
+    ])
+    out = res.to_six_section()
+    assert "## 情绪面·不同观点（C级/低成色）" in out
+    assert "27年新签订单有望翻倍" in out                       # C级观点被提炼出来
+    # 位置:C级段在结论之后、证据链之前(即便材料尾部被截断也落在窗口内)
+    assert out.index("## 结论") < out.index("## 情绪面") < out.index("## 证据链")
+
+
+def test_c_grade_section_absent_when_no_low_grade():
+    """全是 A/B 级时不渲染 C级段(避免空段刷屏)。"""
+    res = AskResult(query="某标的", facts=[
+        _fact("某标的重大合同公告", "A"), _fact("券商研报投资逻辑", "B"),
+    ])
+    assert "## 情绪面" not in res.to_six_section()
+
+
+def test_low_grade_views_filter_dedup_and_order():
+    """_low_grade_views:仅取C/D、按内容去重、保序、不设上限。"""
+    active = [
+        _fact("A级公告", "A"), _fact("C级观点甲", "C"),
+        _fact("C级观点甲", "C"),                              # 同观点不同份 → 去重
+        _fact("D级传闻乙", "D"), _fact("B级研报", "B"),
+    ]
+    views = _low_grade_views(active)
+    assert [v["claim"] for v in views] == ["C级观点甲", "D级传闻乙"]   # 去重+保序,过滤A/B

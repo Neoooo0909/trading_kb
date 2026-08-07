@@ -11,7 +11,7 @@ from typing import Optional
 from . import config
 from .classify import classify_finding, predicate_for, relation_for
 from .critique import CritiqueEngine
-from .entity_quality import attribute_subject, is_garbage_entity
+from .entity_quality import attribute_subject, is_garbage_entity, is_ib_firm
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .grade import grade_fact
@@ -26,8 +26,10 @@ _ORDER_PROGRESSION = {
     "HAS_ORDER_RUMOR": 1, "HAS_ORDER_INTENT": 2,
     "HAS_CONFIRMED_ORDER": 3, "HAS_DELIVERY_VALIDATION": 4,
 }
-# 反证/澄清类 predicate(触发 disputed)
-_CONTRADICTING = {"HAS_CLARIFICATION_RISK", "CONTRADICTS", "HAS_DEMAND_RISK"}
+# 反证/澄清类 predicate(触发 disputed)。
+# HAS_CLARIFICATION 是公告 lane(announcements_to_kb)的澄清公告谓词,2026-08-06 补进来
+# 保持口径一致;公告 lane 不经 ResearchIngestor,其 disputed 标记在该脚本内自行处理。
+_CONTRADICTING = {"HAS_CLARIFICATION_RISK", "HAS_CLARIFICATION", "CONTRADICTS", "HAS_DEMAND_RISK"}
 
 
 @dataclass
@@ -214,12 +216,20 @@ class ResearchIngestor:
 def _pick_subject(f: Finding, card: dict) -> str:
     """选论断主语(治本·多病同治,精度优先)。
 
-    ① 跳过垃圾实体取首个真实体——治"垃圾实体当主语"。
+    ① 跳过垃圾实体**与作者投行**取首个真实体——治"垃圾实体当主语"。
     ② 无可用实体 → attribute_subject(免责剔除 / 点名匹配 / title 锚定主导主体,且关系/指代论断
        不走点名匹配以免方向性挂反)——治未知主体主力。③ 再退 broker;④ 最后未知主体。
+
+    ①的 is_ib_firm 闸是 2026-08-03 加的:此前研报卡的 findings 根本不带 entities(prompt 没要),
+    这一级恒空、形同虚设;补上 entities 后它才真正生效,而研报里最密集的具名机构恰恰是**出报告的
+    投行自己**(Morgan Stanley/中金/高盛/UBS…),不拦就会把作者当主体——误归属比未知主体更糟。
+    用 is_ib_firm 而非另造名单,是为了与②的 card_subject_entities 同口径(它也用这个)。
+    已知其子串匹配会误伤同名非投行(中金黄金/广发银行),但那是既有行为:②同样会剔掉它们,
+    故此处误伤不产生回归(结果仍是未知主体),只是少赚一点。
     """
     for e in (f.entities or []):
-        if isinstance(e, str) and e.strip() and not is_garbage_entity(e, "concept"):
+        if (isinstance(e, str) and e.strip()
+                and not is_garbage_entity(e, "concept") and not is_ib_firm(e)):
             return e
     named = attribute_subject(f"{f.claim} {getattr(f, 'evidence', '')}", card or {})
     return named or f.broker or "未知主体"

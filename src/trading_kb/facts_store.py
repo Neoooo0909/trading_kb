@@ -18,6 +18,11 @@ from .models import Fact, EvidenceLevel
 
 _LEVEL_RANK = {"D": 0, "C": 1, "B": 2, "B+": 3, "A": 4}   # B+ 介于 B 与 A(外资行研报)
 
+# search 的停用 gram:出现在极大比例事实里的 2-gram(公司名后缀/公告套词/泛化行业词),
+# 作为 LIKE 条件没有区分度、只会把 LIMIT 名额吃光。仅过滤自动切出的 gram,不影响完整词。
+_STOP_GRAMS = {"股份", "公司", "有限", "集团", "科技", "关于", "公告", "市场",
+               "行业", "中国", "股东", "计划", "发展", "控股"}
+
 
 class FactsStore:
     """SQLite 时序事实账本。"""
@@ -200,8 +205,16 @@ class FactsStore:
 
     # ── 检索 ──────────────────────────────────────────────────────────────
     def query(self, canonical_id: Optional[str] = None, predicate: Optional[str] = None,
-              include_invalidated: bool = False, limit: int = 100) -> list[dict]:
-        """检索事实。默认只返 active/disputed;include_invalidated=True 返历史(§10.3 审计)。"""
+              include_invalidated: bool = False, limit: int = 100,
+              levels: Optional[list] = None, order: str = "level") -> list[dict]:
+        """检索事实。默认只返 active/disputed;include_invalidated=True 返历史(§10.3 审计)。
+
+        levels: 只取指定成色档(如 ["C","D"])。供 ask 候选池定向补录低成色观点——
+                默认成色降序 + LIMIT 会把重覆盖个股(高成色 >limit)的 C/D 全部截掉,
+                情绪面段静默失效(P0-1 反饿死)。
+        order : "level"=成色降序(默认,原行为) / "recent"=valid_at 降序(取最新边际,
+                不分成色,治"最新研报/社媒进不了池"的时效饿死)。
+        """
         sql = "SELECT * FROM facts WHERE 1=1"
         args: list = []
         if canonical_id:
@@ -210,13 +223,20 @@ class FactsStore:
         if predicate:
             sql += " AND predicate=?"
             args.append(predicate)
+        if levels:
+            sql += f" AND evidence_level IN ({','.join('?' * len(levels))})"
+            args += list(levels)
         if not include_invalidated:
             sql += " AND status IN ('active','disputed')"
-        # 成色排序修正：evidence_level 是 TEXT，DESC 字符串序会把 'D' 排到 'A' 前
-        # （'D'>'C'>'B+'>'B'>'A'），与"高成色优先"意图相反。用 CASE 映射 _LEVEL_RANK。
-        sql += (" ORDER BY CASE evidence_level"
-                " WHEN 'A' THEN 4 WHEN 'B+' THEN 3 WHEN 'B' THEN 2 WHEN 'C' THEN 1 ELSE 0 END DESC,"
-                " support_count DESC LIMIT ?")
+        if order == "recent":
+            # 时效序:valid_at 缺失排最后;同日多源在前
+            sql += " ORDER BY COALESCE(valid_at,'') DESC, support_count DESC LIMIT ?"
+        else:
+            # 成色排序修正：evidence_level 是 TEXT，DESC 字符串序会把 'D' 排到 'A' 前
+            # （'D'>'C'>'B+'>'B'>'A'），与"高成色优先"意图相反。用 CASE 映射 _LEVEL_RANK。
+            sql += (" ORDER BY CASE evidence_level"
+                    " WHEN 'A' THEN 4 WHEN 'B+' THEN 3 WHEN 'B' THEN 2 WHEN 'C' THEN 1 ELSE 0 END DESC,"
+                    " support_count DESC LIMIT ?")
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
@@ -236,7 +256,10 @@ class FactsStore:
         # 上限 40 字:防无分隔超长串(如恶意查询)被切成单个巨 token,生成 LIKE '%<上万字>%'
         # 触发 SQLite "LIKE or GLOB pattern too complex"。真实标的名/关键词远不及 40 字。
         words = [t for t in _re.split(r"[\s,，、;；。]+", text or "") if 2 <= len(t) <= 40]
-        grams = [g for g in _cg(text or "") if len(g) >= 2]
+        # 高频停用 gram(P0-1):"股份/公司"这类 2-gram 在半数以上事实里出现,LIKE 命中几十万行,
+        # 无序 LIMIT 截断后返回的全是无关旧公告(实测查"银轮股份"返回 400 条无一相关)。
+        # 只过滤切出来的 gram,完整词 token(如用户真查"股份回购")不受影响。
+        grams = [g for g in _cg(text or "") if len(g) >= 2 and g not in _STOP_GRAMS]
         toks = list(dict.fromkeys(words + grams))[:24]
         sql = "SELECT * FROM facts WHERE 1=1"
         args: list = []
@@ -255,13 +278,49 @@ class FactsStore:
                 like = f"%{esc}%"
                 args += [like, like, like]
             sql += " AND (" + " OR ".join(ors) + ")"
-        sql += " LIMIT ?"
+        # rowid 降序(P0-1):原先无 ORDER BY,LIMIT 截断取到的是最早插入的行(多为最老公告)。
+        # 改为新入库优先——截断有确定性且偏向新内容;真正的相关性排序交给 ask._rank_facts。
+        # 计划器可倒序走表边扫边截,凑满 LIMIT 即停,不比无序全扫慢。
+        sql += " ORDER BY rowid DESC LIMIT ?"
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def get(self, fact_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
         return dict(row) if row else None
+
+    def patch_extra(self, fact_id: str, kv: dict) -> bool:
+        """给已存在事实的 extra 补**缺失**的键，返回是否真的写了。
+
+        只增不改：已有的键一律不动。upsert 的合并分支只累加来源/升级成色、
+        不碰 extra，所以后到的旁证字段(如公告摘要)需要这条路补。
+        既然不覆盖已有值,重复执行天然幂等,也不会让后到的源改写原始口径。
+
+        整个读-改-写包在 BEGIN IMMEDIATE 里:busy_timeout 只串行化写事务本身,
+        挡不住两个连接各自基于旧 extra 的 read-modify-write 互相覆盖(丢补丁)。
+        """
+        own_txn = not self.conn.in_transaction      # 嵌套在外层事务里时不接管提交/回滚
+        if own_txn:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute("SELECT extra FROM facts WHERE fact_id=?",
+                                    (fact_id,)).fetchone()
+            cur = json.loads(row["extra"] or "{}") if row is not None else {}
+            add = {k: v for k, v in kv.items() if k not in cur and v not in (None, "")}
+            if row is None or not add:
+                if own_txn:
+                    self.conn.rollback()
+                return False
+            cur.update(add)
+            self.conn.execute("UPDATE facts SET extra=? WHERE fact_id=?",
+                              (json.dumps(cur, ensure_ascii=False), fact_id))
+            if own_txn:
+                self.conn.commit()
+            return True
+        except Exception:
+            if own_txn:
+                self.conn.rollback()
+            raise
 
     def stats(self) -> dict:
         rows = self.conn.execute(

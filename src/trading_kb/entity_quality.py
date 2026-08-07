@@ -83,11 +83,26 @@ _RELATIONSHIP = re.compile(
     r"|acquire|acquisition|partnership with")
 
 
+# 与券商字号同形的真实上市公司(子串误伤白名单,2026-08-06 加)。
+# _IB_FIRMS 用子串匹配,"中金黄金"含"中金"、"阳谷华泰"含"华泰"会被当投行剔除,
+# 这些公司的论断永远归属不上主体。精确名命中即豁免;发现新误伤时同步补这里。
+# 注:中信证券/光大证券等"既是券商又是上市公司"的名字不能豁免——豁免会放开
+# "作者券商当主语"的误归属,两害相权保留既有行为(其自有覆盖走公告/互动 lane 兜底)。
+_IB_EXCEPTIONS = {
+    "中金黄金", "中金岭南", "中金辐照", "中金环境",     # ≠ 中金公司
+    "阳谷华泰", "华泰股份", "瑞华泰",                   # ≠ 华泰证券
+    "金海通", "海通发展",                               # ≠ 海通证券
+    "广发银行",                                         # ≠ 广发证券
+}
+
+
 def is_ib_firm(name) -> bool:
-    """是否投行/券商(研报作者/评级方)。"""
+    """是否投行/券商(研报作者/评级方)。同形上市公司(_IB_EXCEPTIONS)豁免。"""
     if not isinstance(name, str):
         return False
     low = name.lower().strip()
+    if name.strip() in _IB_EXCEPTIONS:
+        return False
     return any(k in low for k in _IB_FIRMS)
 
 

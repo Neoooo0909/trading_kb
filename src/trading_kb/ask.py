@@ -46,6 +46,20 @@ class AskResult:
         else:
             lines.append("(无 active 事实,见下方分歧/反证)")
 
+        # 情绪面·不同观点(C级/低成色):把散落在证据链中段、易被材料截断切掉的 C/D 级观点
+        # (社媒研究/媒体/专家纪要——多为前瞻判断与分歧视角)集中提炼、全数前置。情绪与分歧本身
+        # 影响短期价格,单列一段并紧贴结论下方,即便 LLM 材料尾部被截断也一定落在窗口内。
+        # 明确标注 C 级·可靠性待验证,孤证不作独立买点(N1 铁律)。
+        low = _low_grade_views(active)
+        if low:
+            lines.append("\n## 情绪面·不同观点（C级/低成色）")
+            lines.append("（C级/低成色多为社媒研究/媒体/专家纪要等未验证观点，也含少量查无佐证"
+                         "而降级的研报口径；情绪与分歧影响短期价格、也提供对立视角，"
+                         "故单列并全数提炼。可靠性待交叉验证，孤证不作独立买点。）")
+            for f in low:
+                dmark = _doubt_icon(f)
+                lines.append(f"- {_grade_tag(f)}{dmark} {f['claim']}")
+
         # 证据链(带成色编号 + 质疑图标)——完整展现全部相关事实,不截断
         # (relevance<=0 的无关项已在 _rank_facts 过滤;此处不再二次截断,
         #  否则会把按成色轮转上来的研报投资逻辑又砍掉。)
@@ -155,6 +169,15 @@ class AskEngine:
         pool: list[dict] = []
         if cid:
             pool += self.facts.query(canonical_id=cid, include_invalidated=False, limit=120)
+            # 反饿死(P0-1):上一行按成色降序截断,重覆盖个股(高成色事实>120条,如宁德/比亚迪/
+            # 茅台等 279 只)会把 C/D 级与最新事实全部挤出——情绪面段静默失效、"新低成色凭
+            # 时效上榜"(P0)在池外就输了。补两路定向取数:最新 60 条(不分成色,治时效饿死)+
+            # C/D 级最新 60 条(治情绪面饿死);_merge_facts 按 fact_id 去重,
+            # 排序仍交给 _rank_facts 统一按 相关度×成色×时效 加权,此处只保证"进得了池"。
+            pool = _merge_facts(pool, self.facts.query(
+                canonical_id=cid, limit=60, order="recent"))
+            pool = _merge_facts(pool, self.facts.query(
+                canonical_id=cid, levels=["C", "D"], limit=60, order="recent"))
             result.neighbors = self.structure.neighbors(cid)
         pool = _merge_facts(pool, self.facts.search(query, limit=400))
         if want_sem:
@@ -406,6 +429,26 @@ def _recency(valid_at, today_ord: int) -> float:
 
 
 # ── 渲染辅助 ──────────────────────────────────────────────────────────────
+def _low_grade_views(active: list[dict]) -> list[dict]:
+    """从 active 事实里提取 C/D 级(低成色)观点,按现有相关度/时效序保序、按内容去重。
+
+    C 级主体是 social_research(社媒深度研究),另含 media_report/expert_meeting——多为前瞻判断、
+    情绪与分歧视角。用户要求:这类内容影响短期价格、也提供对立观点,应主动提炼进结论而非舍弃。
+    不设条数上限(全数提炼,偏完整性);仅按归一化正文做精确去重,防同一观点多份措辞刷屏。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for f in active:
+        if f.get("evidence_level") not in ("C", "D"):
+            continue
+        key = _normalize(f.get("claim", ""))
+        if not key or key in seen:                # 去重:同观点不同措辞只留首条
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
 def _grade_tag(f: dict) -> str:
     lvl = f["evidence_level"]
     unv = "·待验证" if f["unverifiable"] else ""

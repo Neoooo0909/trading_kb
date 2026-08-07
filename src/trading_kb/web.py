@@ -53,6 +53,7 @@ def ask_payload(query: str, audit: bool) -> dict:
             "followup": [],
             "sources": [],
             "neighbors": [],
+            "c_grade_views": [],
             "synthesis": None,
         }
         if config.USE_LLM and (res.facts or res.neighbors):   # C：Sonnet 合成
@@ -77,6 +78,14 @@ def ask_payload(query: str, audit: bool) -> dict:
             for d in (e.get("doubts") or []):
                 out["doubts"].append({"idx": i, "severity": d.get("severity"),
                                       "message": d.get("message", "")})
+        # 情绪面·不同观点(C级/低成色):全数提炼(不设上限)、按内容去重,前端单列一张卡片。
+        from .ask import _low_grade_views
+        for f in _low_grade_views(active):
+            e = _json_load(f.get("extra"), {})
+            out["c_grade_views"].append({
+                "claim": f["claim"], "level": f["evidence_level"],
+                "unverifiable": bool(f["unverifiable"]), "doubt": e.get("doubt_severity"),
+            })
         out["conflicts"]["disputed"] = [f["claim"] for f in res.facts
                                         if f["status"] == "disputed"]
         out["conflicts"]["invalidated"] = [
@@ -469,6 +478,12 @@ function renderAsk(d){
     h+=`<div class="sec"><h3>🤖 AI 综合</h3><div class="concl" style="white-space:pre-wrap;font-weight:500">${esc(d.synthesis)}</div></div>`;}
   if(d.conclusion){const c=d.conclusion;
     h+=`<div class="sec"><h3>结论</h3><div class="concl">${dotFor(c.doubt)}<div>${esc(c.claim)} ${badge(c.level,c.unverifiable)}</div></div></div>`;}
+  if(d.c_grade_views&&d.c_grade_views.length){
+    h+='<div class="sec"><h3>💬 情绪面·不同观点（C级）</h3>';
+    h+='<p class="muted" style="margin:2px 0 8px">C级/低成色多为社媒研究/媒体/专家纪要等未验证观点，也含少量查无佐证而降级的研报口径；情绪与分歧影响短期价格、也提供对立视角，故单列全数提炼。<b>可靠性待交叉验证，孤证不作独立买点。</b></p>';
+    d.c_grade_views.forEach(f=>{h+=`<div class="ev"><div class="body"><div>${badge(f.level,f.unverifiable)} ${esc(f.claim)}</div></div>${dotFor(f.doubt)}</div>`;});
+    h+='</div>';
+  }
   if(d.evidence.length){
     h+='<div class="sec"><h3>证据链</h3>';
     d.evidence.forEach(f=>{h+=`<div class="ev"><span class="fid">F${f.idx}</span><div class="body">

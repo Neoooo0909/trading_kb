@@ -70,3 +70,21 @@ def test_query_filters_by_predicate(tmp_facts):
     tmp_facts.upsert(_fact())
     assert tmp_facts.query(predicate="HAS_ORDER_INTENT")
     assert tmp_facts.query(predicate="NO_SUCH") == []
+
+
+def test_patch_extra_只增不改且幂等(tmp_facts):
+    """patch_extra 补缺失键、不覆盖已有值、重复执行不变。"""
+    from trading_kb.models import Fact
+    fid = tmp_facts.upsert(Fact(subject="某公司", predicate="HAS_BUYBACK", object="回购公告",
+                                extra={"code": "000001"}))
+    assert tmp_facts.patch_extra(fid, {"summary": "摘要正文"}) is True
+    assert tmp_facts.get(fid)["extra"].find("摘要正文") > 0
+    # 已有键不被改写
+    assert tmp_facts.patch_extra(fid, {"code": "999999"}) is False
+    import json
+    assert json.loads(tmp_facts.get(fid)["extra"])["code"] == "000001"
+    # 幂等：同样的补丁第二次不再写
+    assert tmp_facts.patch_extra(fid, {"summary": "摘要正文"}) is False
+    # 空值不写入
+    assert tmp_facts.patch_extra(fid, {"blank": ""}) is False
+    assert tmp_facts.patch_extra("不存在的id", {"x": "1"}) is False
