@@ -16,7 +16,12 @@ def main() -> int:
     try:
         import pytest  # noqa
         print("检测到 pytest,转用 pytest 运行。")
-        return pytest.main(["-q", str(ROOT / "tests")])
+        # ipo_prospectus 测试一并收集:此前它孤悬在收集路径外,7 个测试等于没有 CI 保护
+        targets = [str(ROOT / "tests")]
+        ipo_test = ROOT / "scripts" / "ipo_prospectus" / "test_ipo_prospectus.py"
+        if ipo_test.exists():
+            targets.append(str(ipo_test))
+        return pytest.main(["-q", *targets])
     except ImportError:
         pass
 

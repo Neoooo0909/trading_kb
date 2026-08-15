@@ -12,7 +12,7 @@ import re
 from datetime import date as _Date
 from pathlib import Path
 
-_LEVEL_W = {"A": 4, "B+": 3, "B": 2, "C": 1, "D": 0}   # 证据成色权重(与 facts 口径一致)
+from .models import LEVEL_RANK as _LEVEL_W   # 证据成色权重,唯一定义点在 models
 
 
 def _today() -> str:
@@ -30,23 +30,35 @@ class HypothesisStore:
 
     # ── 增/改 ────────────────────────────────────────────────────────────
     def new(self, title: str, ticker: str = "", statement: str = "") -> str:
-        """新建假设，返回分配的 id(H001…)。"""
-        hid = self._next_id()
-        fm = {"id": hid, "title": title, "ticker": ticker,
-              "status": "open", "confidence": "0.50",
-              "created": _today(), "updated": _today()}
-        body = (f"## 假设\n{statement or title}\n\n"
-                f"## 证据日志\n"
-                f"（追加: ./tkb hyp evidence {hid} \"…\" --side for|against --grade B）\n\n"
-                f"## 结论\n（未定: ./tkb hyp resolve {hid} <confirmed|refuted|partial> \"…\"）\n")
-        self._write(hid, fm, body)
-        return hid
+        """新建假设，返回分配的 id(H001…)。
+
+        用独占创建("x")落盘:两个并发 `hyp new` 用"读目录取 max+1"会分到同一 ID
+        互相覆盖,独占创建让后到者拿 FileExistsError 后重取下一个 ID。
+        """
+        for _ in range(50):
+            hid = self._next_id()
+            fm = {"id": hid, "title": title, "ticker": ticker,
+                  "status": "open", "confidence": "0.50",
+                  "created": _today(), "updated": _today()}
+            body = (f"## 假设\n{statement or title}\n\n"
+                    f"## 证据日志\n"
+                    f"（追加: ./tkb hyp evidence {hid} \"…\" --side for|against --grade B）\n\n"
+                    f"## 结论\n（未定: ./tkb hyp resolve {hid} <confirmed|refuted|partial> \"…\"）\n")
+            try:
+                with open(self._path(hid), "x", encoding="utf-8") as fh:
+                    fh.write(self._render(fm, body))
+                return hid
+            except FileExistsError:
+                continue
+        raise RuntimeError("hyp new 连续 50 次 ID 冲突(异常)")
 
     def add_evidence(self, hid: str, text: str, side: str,
                      grade: str = "C", date: str = "") -> float:
         """追加一条证据(side=for/against，grade=成色)，刷新置信度并返回。"""
         if side not in ("for", "against"):
             raise ValueError("side 必须是 for 或 against")
+        if grade not in _LEVEL_W:
+            raise ValueError(f"grade 必须是 {'/'.join(_LEVEL_W)}(收到 {grade!r})")
         fm, body = self._read(hid)
         line = f"- [{date or _today()}][{side}][{grade}] {text}"
         body = self._append_to_section(body, "证据日志", line)
@@ -89,7 +101,8 @@ class HypothesisStore:
     def _confidence(body: str) -> float:
         """按 for/against 证据的成色加权估置信度(0~1，0.5 为无证据先验)。"""
         forw = againstw = 0
-        for side, grade in re.findall(r"(?m)^- \[[^\]]*\]\[(for|against)\]\[([AB+CD]+)\]", body):
+        # 成色是枚举不是字符集:旧写法 [AB+CD]+ 会把 "BBAD" 也当合法档
+        for side, grade in re.findall(r"(?m)^- \[[^\]]*\]\[(for|against)\]\[(A|B\+|B|C|D)\]", body):
             w = _LEVEL_W.get(grade, 1) + 1            # +1 让 D 也有最小权重
             if side == "for":
                 forw += w
@@ -113,9 +126,12 @@ class HypothesisStore:
         """frontmatter 值单行化：换行会被 _parse 误拆成额外 key，故折叠为空格。"""
         return " ".join(str(v).split())
 
-    def _write(self, hid: str, fm: dict, body: str) -> None:
+    def _render(self, fm: dict, body: str) -> str:
         fm_txt = "\n".join(f"{k}: {self._flat(v)}" for k, v in fm.items())
-        self._path(hid).write_text(f"---\n{fm_txt}\n---\n\n{body}", encoding="utf-8")
+        return f"---\n{fm_txt}\n---\n\n{body}"
+
+    def _write(self, hid: str, fm: dict, body: str) -> None:
+        self._path(hid).write_text(self._render(fm, body), encoding="utf-8")
 
     def _read(self, hid: str):
         return self._parse(self._path(hid).read_text(encoding="utf-8"))

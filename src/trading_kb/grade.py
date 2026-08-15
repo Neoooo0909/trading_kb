@@ -44,8 +44,14 @@ def baseline_grade(source_kind: str) -> EvidenceLevel:
 def grade_fact(f: Finding, predicate: str, verify=None) -> tuple[EvidenceLevel, bool]:
     """返回 (evidence_level, unverifiable)。
 
-    verify 为可选数据验证钩子,签名 verify(finding, predicate) -> Optional[str]:
-      返回 'confirmed' / 'refuted' / None(查无)。仅对可验证类调用。
+    verify 为可选数据验证钩子,签名 verify(finding, predicate) -> Optional[str]。
+    三态协议(docs/ARCHITECTURE.md §2.1,四种合法返回值):
+      'confirmed'   查到同主题权威证据 → 升 A
+      'refuted'     权威证据打脸       → 降 D
+      'no_evidence' 真的查了、没有对应证据 → 降一档(查不到≠证伪)
+      None          没查(未接通/异常/该谓词无验证动作) → 保持基线
+    历史缺陷:v0.4 前 None 被当"查无"降级,导致空桩钩子让全体可验证事实
+    未经任何实查就被降档;新 verifier 禁止把"没查"与"查无"折叠。
     """
     base = baseline_grade(f.source_kind)
 
@@ -63,8 +69,11 @@ def grade_fact(f: Finding, predicate: str, verify=None) -> tuple[EvidenceLevel, 
     if result == "refuted":
         # 数据打脸:交由上层写 CONTRADICTS;此处返回最低成色标记
         return "D", False
-    # 查无(None):降级一档但不低于 C,保留 unverifiable(查不到≠证伪)
-    return _downgrade(base), True
+    if result == "no_evidence":
+        # 实查过且无对应证据:降级一档但不低于 C,保留 unverifiable
+        return _downgrade(base), True
+    # None = 本条实际没被验证:与"无钩子"同义,保持基线(不假装查过)
+    return base, True
 
 
 def _downgrade(level: EvidenceLevel) -> EvidenceLevel:

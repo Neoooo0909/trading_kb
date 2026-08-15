@@ -28,7 +28,8 @@ class EntityRegistry:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path), timeout=30)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout=30000")   # A2:并发等锁而非立即崩
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute("PRAGMA journal_mode=WAL")   # 读写不互斥;备份须走 sqlite3 .backup(ARCHITECTURE.md §2.4)   # A2:并发等锁而非立即崩
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -85,8 +86,32 @@ class EntityRegistry:
         )
         self.conn.commit()
 
+    # ── 公共查询(供 ask 等上层用;conn 是私有实现,上层不得裸摸)────────────
+    def aliases_of(self, canonical_id: str) -> set[str]:
+        """某实体的全部非空别名(归一形)。"""
+        return {r["alias_norm"] for r in self.conn.execute(
+            "SELECT alias_norm FROM aliases WHERE canonical_id=?", (canonical_id,)
+        ).fetchall() if r["alias_norm"]}
+
+    def iter_aliases(self) -> list:
+        """全部 (alias_norm, canonical_id),按别名长度降序(实体定位用)。"""
+        return self.conn.execute(
+            "SELECT alias_norm, canonical_id FROM aliases ORDER BY LENGTH(alias_norm) DESC"
+        ).fetchall()
+
+    def aliases_with_length(self, n: int) -> list:
+        """指定长度的 (alias_norm, canonical_id)(字形纠错用)。"""
+        return self.conn.execute(
+            "SELECT alias_norm, canonical_id FROM aliases WHERE LENGTH(alias_norm)=?", (n,)
+        ).fetchall()
+
     def merge(self, from_id: str, into_id: str) -> None:
-        """事后合并:from_id 标记 merged_into into_id,别名改指 into_id(§17 F5)。"""
+        """事后合并:from_id 标记 merged_into into_id,别名改指 into_id(§17 F5)。
+
+        边界警示:本方法只改注册表,**不改 facts 表的 canonical_id**——事实侧的
+        重挂由治理脚本(scripts/clean_entities._reattribute)完成,两步不是原子的。
+        两条 UPDATE 共享 python sqlite3 的隐式事务,commit 一次原子生效。
+        """
         self.conn.execute("UPDATE entities SET merged_into=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.execute("UPDATE aliases SET canonical_id=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.commit()

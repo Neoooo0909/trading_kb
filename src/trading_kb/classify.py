@@ -297,7 +297,12 @@ def _match_structure(text: str) -> bool:
 
 
 def _has_metric(f: Finding) -> bool:
-    """是否带可量化指标(数字字段非空,或文本含百分比/比率)。"""
+    """是否带可量化指标(numbers 非空,或文本含**任意数字**)。
+
+    注:第二支正则宽松到"任意数字"是现状口径(量化词+数字即判 quant_fact),
+    此处如实注明;收紧到"仅百分比/比率"属分类规则变更,会重划存量类别,
+    必须连带 requalify 迁移(见 ARCHITECTURE.md §5),不要顺手改。
+    """
     if f.numbers:
         return True
     return bool(re.search(r"\d+\.?\d*%|\d+\.?\d*", f.claim + f.evidence))

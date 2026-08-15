@@ -33,78 +33,31 @@ def _json_load(s: str, default):
 
 
 def ask_payload(query: str, audit: bool) -> dict:
-    """跑一次问答,产出结构化六段(供前端上色),不复用文本渲染。"""
+    """跑一次问答。结构化六段由 AskResult.to_payload() 统一产出(唯一出口,
+    ARCHITECTURE.md §2.3),web 端只补 LLM 合成——不再手工拼装(v0.4 的手工版
+    带着文本版已修掉的 [:8]/[:12] 截断旧 bug 在跑)。"""
     config.ensure_data_dir()
     reg = EntityRegistry(config.ENTITY_DB)
     facts = FactsStore(config.FACTS_DB)
     structure = StructureStore(config.STRUCTURE_DB)
     try:
         res = AskEngine(reg, facts, structure).ask(query, include_invalidated=audit)
-        active = [f for f in res.facts if f["status"] == "active"]
-        out: dict = {
-            "query": query,
-            "canonical_id": res.canonical_id,
-            "found": bool(res.facts or res.neighbors),
-            "warnings": list(res.warnings),
-            "conclusion": None,
-            "evidence": [],
-            "doubts": [],
-            "conflicts": {"disputed": [], "invalidated": []},
-            "followup": [],
-            "sources": [],
-            "neighbors": [],
-            "c_grade_views": [],
-            "synthesis": None,
-        }
-        if config.USE_LLM and (res.facts or res.neighbors):   # C：Sonnet 合成
+        out = res.to_payload()
+        if config.USE_LLM and out["found"]:   # C：Sonnet 合成
             from .llm import synthesize_answer
             out["synthesis"] = synthesize_answer(query, res.to_six_section())
-        if active:
-            top = active[0]
-            te = _json_load(top.get("extra"), {})
-            out["conclusion"] = {
-                "claim": top["claim"], "level": top["evidence_level"],
-                "unverifiable": bool(top["unverifiable"]),
-                "doubt": te.get("doubt_severity"),
-            }
-        for i, f in enumerate(active[:8], 1):
-            e = _json_load(f.get("extra"), {})
-            out["evidence"].append({
-                "idx": i, "claim": f["claim"], "level": f["evidence_level"],
-                "unverifiable": bool(f["unverifiable"]),
-                "support": f["support_count"], "verified": e.get("verified_numbers", 0),
-                "doubt": e.get("doubt_severity"),
-            })
-            for d in (e.get("doubts") or []):
-                out["doubts"].append({"idx": i, "severity": d.get("severity"),
-                                      "message": d.get("message", "")})
-        # 情绪面·不同观点(C级/低成色):全数提炼(不设上限)、按内容去重,前端单列一张卡片。
-        from .ask import _low_grade_views
-        for f in _low_grade_views(active):
-            e = _json_load(f.get("extra"), {})
-            out["c_grade_views"].append({
-                "claim": f["claim"], "level": f["evidence_level"],
-                "unverifiable": bool(f["unverifiable"]), "doubt": e.get("doubt_severity"),
-            })
-        out["conflicts"]["disputed"] = [f["claim"] for f in res.facts
-                                        if f["status"] == "disputed"]
-        out["conflicts"]["invalidated"] = [
-            {"claim": f["claim"], "status": f["status"]}
-            for f in res.invalidated_facts[:5]]
-        out["followup"] = [f["claim"][:80] for f in active if f["unverifiable"]][:5]
-        srcs = sorted({s for f in active for s in _json_load(f.get("sources"), [])})
-        out["sources"] = srcs[:12]
-        out["neighbors"] = [{"rel": n.get("rel_type", ""), "name": n.get("dst", "")}
-                            for n in res.neighbors[:8]]
         return out
     finally:
         reg.close(); facts.close(); structure.close()
 
 
 def feed_payload(text: str, watch: str) -> dict:
-    """粘贴的聊天/短评文本逐条入舆情轻 lane,回执命中/冷存。"""
+    """粘贴的聊天/短评文本逐条入舆情轻 lane,回执命中/冷存。
+
+    碎片解析走 sentiment_lane.parse_fragments(与 cli 共用,不再反向 import cli)。
+    """
     import re
-    from .cli import _TS_RE
+    from .sentiment_lane import parse_fragments
     config.ensure_data_dir()
     reg = EntityRegistry(config.ENTITY_DB)
     lane = SentimentLane(config.SENTIMENT_DB, reg)
@@ -113,16 +66,7 @@ def feed_payload(text: str, watch: str) -> dict:
                  if watch.strip() else reg.watch_terms())
         if not terms:
             return {"ok": False, "msg": "关注标的池为空:先在「概览」里重摄入研报建池,或在下方填写关注标的。"}
-        frags = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            m = _TS_RE.match(line)
-            if m and m.group(2).strip():
-                frags.append((m.group(2).strip(), m.group(1)))
-            else:
-                frags.append((line, ""))
+        frags = parse_fragments(text)
         stance_fn = None
         if config.USE_LLM:                   # B：碎片立场走 LLM
             from .llm import make_llm_stance
@@ -154,26 +98,18 @@ def stats_payload() -> dict:
 
 
 def critique_payload(top: int = 20) -> dict:
-    """最该质疑的事实(按严重度排序)。"""
+    """最该质疑的事实(排序逻辑在 critique.collect_doubts,与 cli 共用)。"""
+    from .critique import collect_doubts
     config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
     try:
-        rows = facts.query(include_invalidated=False, limit=5000)
-        rank = {"high": 3, "medium": 2, "low": 1}
-        scored = []
-        for f in rows:
-            extra = _json_load(f.get("extra"), {})
-            doubts = extra.get("doubts") or []
-            if doubts:
-                sev = extra.get("doubt_severity")
-                scored.append((rank.get(sev, 0), f, doubts))
-        scored.sort(key=lambda x: -x[0])
-        items = []
-        for _, f, doubts in scored[:top]:
-            items.append({"claim": f["claim"][:80], "level": f["evidence_level"],
-                          "flags": [{"severity": d.get("severity"),
-                                     "message": d.get("message", "")} for d in doubts]})
-        return {"total": len(scored), "items": items}
+        total, ranked = collect_doubts(
+            facts.query(include_invalidated=False, limit=5000), top=top)
+        items = [{"claim": f["claim"][:80], "level": f["evidence_level"],
+                  "flags": [{"severity": d.get("severity"),
+                             "message": d.get("message", "")} for d in doubts]}
+                 for f, doubts in ranked]
+        return {"total": total, "items": items}
     finally:
         facts.close()
 
@@ -213,19 +149,41 @@ class _Handler(BaseHTTPRequestHandler):
             return {}
         return _json_load(self.rfile.read(n).decode("utf-8"), {})
 
+    def _guard(self, need_json: bool = False) -> bool:
+        """轻量本地防护:Host 必须是回环地址(防 DNS rebinding 读库),POST API 要求
+        JSON Content-Type(fetch 带该头即触发 CORS preflight,跨站 <form> 无法伪造,
+        低成本封死 CSRF 触发重摄入)。失败返回 False 并已回 403。"""
+        host = (self.headers.get("Host") or "").split(":")[0]
+        if host not in ("127.0.0.1", "localhost", "[::1]"):
+            self._json({"error": "forbidden: bad host"}, code=403)
+            return False
+        if need_json:
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype != "application/json":
+                self._json({"error": "forbidden: expect application/json"}, code=403)
+                return False
+        return True
+
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
-        if path == "/":
-            self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
-        elif path == "/api/stats":
-            self._json(stats_payload())
-        elif path == "/api/critique":
-            self._json(critique_payload())
-        else:
-            self._send(404, b"not found", "text/plain")
+        if not self._guard():
+            return
+        try:
+            if path == "/":
+                self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/stats":
+                self._json(stats_payload())
+            elif path == "/api/critique":
+                self._json(critique_payload())
+            else:
+                self._send(404, b"not found", "text/plain")
+        except Exception as e:                       # 与 do_POST 对称,不掐连接
+            self._json({"error": f"{type(e).__name__}: {e}"}, code=500)
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0]
+        if not self._guard(need_json=True):
+            return
         try:
             if path == "/api/ask":
                 b = self._body()
@@ -343,6 +301,7 @@ textarea{resize:vertical;min-height:150px;font-size:14px;line-height:1.7}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;
   padding:3px 9px;border-radius:999px;flex:0 0 auto}
 .badge.A{color:var(--A);background:#e7f6ec}.badge.B{color:var(--B);background:#e7effd}
+.badge.Bp{color:#7c3aed;background:#f1eafd}
 .badge.C{color:var(--C);background:#fcf1e0}.badge.D{color:var(--D);background:#eef0f2}
 .badge .v{opacity:.7;font-weight:600}
 .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto;margin-top:7px}
@@ -383,7 +342,7 @@ footer code{background:#ececf5;padding:2px 7px;border-radius:5px}
 <header>
   <div class="hwrap">
     <div class="brand"><span class="logo">📊</span><h1>trading_kb</h1></div>
-    <p class="tag">A股个人投研信息处理中枢 —— 研报、聊天、短评一股脑丢进来,自动过滤提纯成分了成色、核了数字、会质疑、可追溯的私人投研大脑。</p>
+    <p class="tag">A股个人投研信息处理中枢 —— 研报、聊天、短评一股脑丢进来,自动过滤提纯、分成色、核数字、会质疑、可追溯的私人投研大脑。</p>
     <div class="pills" id="pills">
       <span class="pill">⏳ 加载概览…</span>
     </div>
@@ -442,8 +401,10 @@ footer code{background:#ececf5;padding:2px 7px;border-radius:5px}
 
 <script>
 const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const LV={A:'A级',B:'B级',C:'C级',D:'D级'};
-function badge(level,unver){return `<span class="badge ${esc(level)}">${LV[level]||level+'级'}${unver?'<span class="v">·待验证</span>':''}</span>`;}
+// 展示映射与 models.LEVEL_RANK 档位对齐(新增档位需同步);'B+' 的 CSS class 用安全名 Bp
+const LV={A:'A级','B+':'B+级',B:'B级',C:'C级',D:'D级'};
+const LVCLS={A:'A','B+':'Bp',B:'B',C:'C',D:'D'};
+function badge(level,unver){return `<span class="badge ${LVCLS[level]||'D'}">${esc(LV[level]||level+'级')}${unver?'<span class="v">·待验证</span>':''}</span>`;}
 function dotFor(sev){return sev?`<span class="dot ${esc(sev)}" title="质疑：${esc(sev)}"></span>`:'';}
 
 // tabs
@@ -548,13 +509,16 @@ $('#feedBtn').onclick=feed;
 // ── 概览 ──
 function lvbar(dist){
   const tot=Object.values(dist).reduce((a,b)=>a+b,0)||1;
-  const col={A:'var(--A)',B:'var(--B)',C:'var(--C)',D:'var(--D)'};
-  let s='';for(const k of['A','B','C','D']){const w=(dist[k]||0)/tot*100;if(w>0)s+=`<i style="width:${w}%;background:${col[k]}" title="${k}级 ${dist[k]}"></i>`;}
+  const col={A:'var(--A)','B+':'#7c3aed',B:'var(--B)',C:'var(--C)',D:'var(--D)'};
+  let s='';for(const k of['A','B+','B','C','D']){const w=(dist[k]||0)/tot*100;if(w>0)s+=`<i style="width:${w}%;background:${col[k]}" title="${k}级 ${dist[k]}"></i>`;}
   return `<div class="lvbar">${s}</div>`;
 }
 async function loadStats(){
   loaded.stats=true;
-  const r=await fetch('/api/stats'); const d=await r.json();
+  let d;
+  try{const r=await fetch('/api/stats'); d=await r.json();}
+  catch(e){loaded.stats=false;   // 失败允许下次重试,不再永卡"加载中…"
+    $('#statsOut').innerHTML='<div class="warn">概览加载失败：'+esc(e)+'（切回本页重试）</div>';return;}
   const f=d.facts||{},e=d.entities||{},st=d.structure||{},se=d.sentiment||{};
   const dist=f.by_level||{}, active=(f.by_status||{}).active??0;
   $('#statsOut').innerHTML=`<div class="grid">
@@ -568,7 +532,7 @@ async function loadStats(){
 async function reingest(){
   const btn=$('#reingestBtn'); btn.disabled=true; btn.innerHTML='<span class="spin" style="border-color:rgba(124,58,237,.3);border-top-color:var(--accent)"></span> 摄入中…';
   try{
-    const r=await fetch('/api/ingest',{method:'POST'}); const d=await r.json();
+    const r=await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); const d=await r.json();
     if(d.error){alert('失败：'+d.error);}
     else{loaded.stats=false;loadStats();
       $('#statsOut').insertAdjacentHTML('afterbegin',
@@ -581,7 +545,10 @@ $('#reingestBtn').onclick=reingest;
 // ── 质疑榜 ──
 async function loadCrit(){
   loaded.crit=true;
-  const r=await fetch('/api/critique'); const d=await r.json();
+  let d;
+  try{const r=await fetch('/api/critique'); d=await r.json();}
+  catch(e){loaded.crit=false;
+    $('#critOut').innerHTML='<div class="warn">质疑榜加载失败：'+esc(e)+'（切回本页重试）</div>';return;}
   if(!d.items||!d.items.length){$('#critOut').innerHTML='<div class="empty"><div class="ic">✓</div><p>暂无带质疑标记的结论。<br>（量化语料里硬事实少；灌入行业/公司研报后此榜更有料）</p></div>';return;}
   let h=`<p class="muted">共 ${d.total} 条结论带质疑，按严重度排序取前 ${d.items.length}：</p>`;
   d.items.forEach(it=>{

@@ -18,13 +18,8 @@ from .ask import AskEngine
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .ingest import run_ingest
-from .sentiment_lane import SentimentLane
+from .sentiment_lane import SentimentLane, parse_fragments
 from .structure_store import StructureStore
-
-# 行首时间戳:[2026-06-10 09:30] 内容 / 2026-06-10 09:30\t内容 / 2026-06-10 内容
-_TS_RE = re.compile(
-    r"^\s*\[?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)\]?\s*[\t,:：]?\s*(.*)$"
-)
 
 
 def cmd_ingest(args) -> None:
@@ -98,31 +93,21 @@ def cmd_stats(args) -> None:
 
 
 def cmd_critique(args) -> None:
-    """列出最该质疑的事实(按严重度排序)。"""
-    import json
+    """列出最该质疑的事实(排序逻辑在 critique.collect_doubts,与 web 共用)。"""
+    from .critique import collect_doubts
     config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
-    rows = facts.query(include_invalidated=False, limit=5000)
-    rank = {"high": 3, "medium": 2, "low": 1}
-    scored = []
-    for f in rows:
-        try:
-            extra = json.loads(f.get("extra") or "{}")
-        except Exception:
-            extra = {}
-        doubts = extra.get("doubts") or []
-        if doubts:
-            sev = extra.get("doubt_severity")
-            scored.append((rank.get(sev, 0), f, doubts))
-    scored.sort(key=lambda x: -x[0])
-    n = args.top or 15
-    print(f"=== 最该质疑的 {min(n, len(scored))} 条(共 {len(scored)} 条带质疑)===")
-    for _, f, doubts in scored[:n]:
-        print(f"\n• {f['claim'][:60]}  [{f['evidence_level']}级]")
-        for d in doubts:
-            icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(d.get("severity"), "•")
-            print(f"    {icon} {d.get('message','')}")
-    facts.close()
+    try:
+        total, ranked = collect_doubts(
+            facts.query(include_invalidated=False, limit=5000), top=args.top or 15)
+        print(f"=== 最该质疑的 {len(ranked)} 条(共 {total} 条带质疑)===")
+        for f, doubts in ranked:
+            print(f"\n• {f['claim'][:60]}  [{f['evidence_level']}级]")
+            for d in doubts:
+                icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(d.get("severity"), "•")
+                print(f"    {icon} {d.get('message','')}")
+    finally:
+        facts.close()
 
 
 def cmd_deep_check(args) -> None:
@@ -166,24 +151,10 @@ def cmd_deep_check(args) -> None:
 
 
 def _read_fragments(path: Path) -> list[tuple[str, str]]:
-    """读聊天/短评文件 → [(文本, 时间戳)]。
-
-    规则:每非空行一条;行首可带时间戳(YYYY-MM-DD 选带 HH:MM[:SS]),
-    支持 `[..]`、`\\t`、`,`、`:` 等常见分隔;无时间戳则时间戳留空。
-    """
-    out: list[tuple[str, str]] = []
+    """读聊天/短评文件 → [(文本, 时间戳)]。解析规则见 sentiment_lane.parse_fragments。"""
     if not path.is_file():            # is_file 而非 exists:目录/空串("."→目录)不应进 read_text
-        return out
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = _TS_RE.match(line)
-        if m and m.group(2).strip():        # 行首确为时间戳且后面还有正文
-            out.append((m.group(2).strip(), m.group(1)))
-        else:
-            out.append((line, ""))
-    return out
+        return []
+    return parse_fragments(path.read_text(encoding="utf-8", errors="replace"))
 
 
 def cmd_feed_chat(args) -> None:
@@ -250,10 +221,13 @@ def cmd_add(args) -> None:
         print(f"⚠️  {len(missing)} 个路径不存在,将跳过:{', '.join(missing)}")
         paths = [p for p in paths if Path(p).exists()]
     batch_args = ["--batch", args.batch] if args.batch else []
+    # sys.executable 而非裸 "python3":launchd/受限 PATH 下裸名会落到系统 3.9
+    # (曾在 tdxdata 更新任务上崩过),用当前解释器保证版本一致。
+    py = sys.executable or "python3"
     steps = [
-        (["python3", "ingest.py", *paths, *batch_args], "① PDF 入库 + 判型(0 token)"),
-        (["python3", "extract.py"], "② 模型抽卡片(Kimi→DeepSeek→Sonnet 降级,耗时/可能耗 API)"),
-        (["python3", "verify.py"], "③ 数字回原文校验(0 token)"),
+        ([py, "ingest.py", *paths, *batch_args], "① PDF 入库 + 判型(0 token)"),
+        ([py, "extract.py"], "② 模型抽卡片(Kimi→DeepSeek→Sonnet 降级,耗时/可能耗 API)"),
+        ([py, "verify.py"], "③ 数字回原文校验(0 token)"),
     ]
     for cmd, desc in steps:
         print(f"\n▶ {desc}\n  $ (cd {scripts}) {' '.join(cmd)}", flush=True)
@@ -381,10 +355,9 @@ def cmd_semantic(args) -> None:
         print("✗ 语义层不可用(.venv-embed/模型/numpy 缺失)。检查 .venv-embed 与模型目录。")
         return
     facts = FactsStore(config.FACTS_DB)
-    n_facts = facts.conn.execute(
-        "SELECT COUNT(*) FROM facts WHERE status IN ('active','disputed')").fetchone()[0]
+    n_facts = facts.count_active()
     if args.action == "status":
-        total = idx._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        total = idx.vector_count()
         print("=== 语义索引状态 ===")
         print(f"后端: {idx.backend.name} ({idx.backend.dim} 维) | 向量库: {idx.vec_db.name}")
         print(f"已建向量: {total} | 应建事实(active/disputed): {n_facts} | 覆盖 {total}/{n_facts}")
@@ -394,23 +367,30 @@ def cmd_semantic(args) -> None:
         print(f"▶ 增量建索引(后端 {idx.backend.name}/{idx.backend.dim}维，应建 {n_facts} 条)…"
               "大库首次较慢，请耐心。", flush=True)
         n = idx.build(facts)
-        total = idx._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
-        print(f"✓ 新增 {n} 条向量，索引共 {total} 条 → {idx.vec_db}")
+        print(f"✓ 新增 {n} 条向量，索引共 {idx.vector_count()} 条 → {idx.vec_db}")
     facts.close()
 
 
 def _build_data_tools() -> dict:
-    """尽力接入 tdx(行情)/ifind(财务)作为 deep_ask 工具;接不上则该工具缺省提示未接入。"""
+    """尽力接入 tdx(行情)/ifind(财务)作为 deep_ask 工具;接不上则该工具缺省提示未接入。
+
+    sys.path 用 append 而非 insert(0):家目录堆满脚本,抢占 [0] 位会让任何同名
+    文件 shadow 标准库/三方包。接入失败打一行 stderr(§2.2),不再无声吞掉。
+    """
     tools: dict = {}
     try:
-        sys.path.insert(0, str(Path.home() / "tdx"))
+        p = str(Path.home() / "tdx")
+        if p not in sys.path:
+            sys.path.append(p)
         from tdx import TdxData
         _t = TdxData()
         tools["quote"] = lambda code: str(_t.quote(code))[:600]
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[deep] tdx 行情工具未接入({type(e).__name__})", file=sys.stderr)
     try:
-        sys.path.insert(0, str(Path.home()))
+        p = str(Path.home())
+        if p not in sys.path:
+            sys.path.append(p)
         from ifind_ft import iFindFT
         _ft = iFindFT()
 
@@ -420,8 +400,8 @@ def _build_data_tools() -> dict:
                           interval="Q", days="Alldays")
             return df.to_string()[:600] if hasattr(df, "to_string") else str(df)
         tools["finance"] = _fin
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[deep] ifind 财务工具未接入({type(e).__name__})", file=sys.stderr)
     return tools
 
 
@@ -481,7 +461,8 @@ def main(argv=None) -> int:
     ph.add_argument("--statement", default="", help="假设详述(new)")
     ph.add_argument("--ev", default="", help="证据/结论内容(evidence/resolve)")
     ph.add_argument("--side", choices=["for", "against"], default="for")
-    ph.add_argument("--grade", default="C", help="证据成色 A/B+/B/C/D")
+    ph.add_argument("--grade", default="C", choices=["A", "B+", "B", "C", "D"],
+                    help="证据成色")
     ph.add_argument("--verdict", choices=["confirmed", "refuted", "partial"], default="partial")
     ph.set_defaults(func=cmd_hyp)
 

@@ -19,6 +19,11 @@ Category = Literal["hard_fact", "structure", "quant_fact", "background"]
 # ── 成色等级(§19)────────────────────────────────────────────────────────
 EvidenceLevel = Literal["A", "B+", "B", "C", "D"]
 
+# 成色排序权重的**唯一定义点**(ARCHITECTURE.md §2.3)。
+# facts_store 的 SQL CASE、hypothesis 置信度、web 前端展示全部从这里派生;
+# 新增档位只改这里(web 前端 JS 的 LV 映射需同步,见 web.py 注释)。
+LEVEL_RANK: dict[str, int] = {"D": 0, "C": 1, "B": 2, "B+": 3, "A": 4}
+
 # ── 事实状态(§18/§10.3 双时态生命周期)──────────────────────────────────
 FactStatus = Literal["active", "superseded", "invalidated", "expired", "disputed"]
 
@@ -131,10 +136,11 @@ def _normalize(s: str) -> str:
     """
     if not s:
         return ""
-    out = s.lower()
-    for ch in " \t\n　,，.。、;；:：!！?？\"'“”‘’()（）[]【】":
-        out = out.replace(ch, "")
-    return out
+    return s.lower().translate(_NORM_TABLE)
+
+
+# 单趟删除表(等价于逐字符 replace,但 30 个标点只扫一遍;高频路径:去重键/实体定位)
+_NORM_TABLE = {ord(ch): None for ch in " \t\n　,，.。、;；:：!！?？\"'“”‘’()（）[]【】"}
 
 
 def content_grams(s: str) -> set[str]:

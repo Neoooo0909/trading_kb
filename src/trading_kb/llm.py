@@ -8,6 +8,7 @@ run_ingest(llm_classify=...) 即让分流走 LLM 复判。其他语料处理（�
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Optional
@@ -17,13 +18,31 @@ from .models import Finding
 _RL_SCRIPTS = Path.home() / "report_lab" / "scripts"
 _CATEGORIES = ("hard_fact", "structure", "quant_fact", "background")
 
+_chat_fn = None
+
 
 def _chat():
-    """懒加载 report_lab 的降级链 chat()（Kimi→DeepSeek→Sonnet）。"""
+    """按绝对路径加载 report_lab 的降级链 chat()（Kimi→DeepSeek→Sonnet）。
+
+    不再 `sys.path.insert(0)` + `import common`:"common" 是高碰撞模块名,抢占
+    sys.path[0] 会让任何路径上的同名文件被误导入(report_lab 链路的历史事故
+    多发生在这条注入链上)。改 spec_from_file_location 精确加载该文件;
+    其目录以 append 补进 sys.path 尾部,仅供 common 自身的兄弟导入使用。
+    """
+    global _chat_fn
+    if _chat_fn is not None:
+        return _chat_fn
+    src = _RL_SCRIPTS / "common.py"
+    if not src.exists():
+        raise FileNotFoundError(f"report_lab 降级链不可用:{src} 不存在")
     if str(_RL_SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(_RL_SCRIPTS))
-    from common import chat
-    return chat
+        sys.path.append(str(_RL_SCRIPTS))
+    spec = importlib.util.spec_from_file_location("_tkb_rl_common", src)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_tkb_rl_common"] = mod
+    spec.loader.exec_module(mod)
+    _chat_fn = mod.chat
+    return _chat_fn
 
 
 def available() -> bool:
@@ -36,10 +55,16 @@ def available() -> bool:
 
 
 def complete(prompt: str, max_tokens: int = 2048, tier: str = "extract") -> Optional[str]:
-    """走降级链取一段补全；全链失败返回 None。tier=extract 从最便宜(Kimi)起，answer 从 Sonnet 起。"""
+    """走降级链取一段补全；全链失败返回 None(带 stderr 告警,§2.2 失败必须出声)。
+
+    tier=extract 从最便宜(Kimi)起，answer 从 Sonnet 起。
+    None 对调用方意味着"额度耗尽/断网/链路全死"与"模型没答"的合并降级——
+    告警让链路故障不再与正常回退混为一谈(report_lab LLMUnavailable 同款教训)。
+    """
     try:
         return _chat()(prompt, max_tokens=max_tokens, tier=tier)
-    except Exception:
+    except Exception as e:
+        print(f"[llm] 降级链调用失败({type(e).__name__}: {e}),返回 None", file=sys.stderr)
         return None
 
 

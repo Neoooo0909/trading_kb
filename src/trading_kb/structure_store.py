@@ -22,7 +22,8 @@ class StructureStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path), timeout=30)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout=30000")   # A2 并发
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute("PRAGMA journal_mode=WAL")   # 读写不互斥;备份须走 sqlite3 .backup(ARCHITECTURE.md §2.4)   # A2 并发
         self._init_schema()
 
     def _init_schema(self) -> None:

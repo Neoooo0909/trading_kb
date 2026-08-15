@@ -129,13 +129,23 @@ def _default_fetch(code: str, category: str) -> list[dict]:
         return []
 
 
+# 事件同义归一表(英名→中名等)。个案随发现在此追加,勿散写进函数体——
+# 下一个"康宁"只加一行,不改逻辑。
+_ALIAS_NORMALIZE: list[tuple[str, str]] = [
+    ("Corning", "康宁"),
+    ("ＢＯＥ", "京东方"),
+    ("BOE", "京东方"),
+]
+
+
 def _event_grams(claim: str, subject: str = "") -> set:
     """事件归一 gram:剥结构事实的关系前缀「实体」（极性）：、英中名与 MOU 同义归一、去主体名,
     使同一桩事件(康宁×京东方×MOU)的不同措辞/关系(SUPPLIES_TO/BENEFITS/DRIVES…)落到相近 gram 集。"""
     import re
     m = re.search(r"」（[^）]*）：(.+)$", claim)            # 结构事实:取「实体」（极性）：之后的真正描述
     core = m.group(1) if m else claim
-    core = core.replace("Corning", "康宁").replace("ＢＯＥ", "京东方").replace("BOE", "京东方")
+    for en, zh in _ALIAS_NORMALIZE:
+        core = core.replace(en, zh)
     core = re.sub(r"(?i)mou|备忘录", "MOU", core)           # MoU/MOU/备忘录/合作备忘录 归一
     g = content_grams(core)
     return (g - content_grams(subject)) if subject else g

@@ -62,11 +62,24 @@ def test_grade_verifiable_confirmed_upgrades():
     assert unver is False
 
 
-def test_grade_verifiable_not_found_downgrades_not_refutes():
-    """查无 ≠ 证伪:温和降级,仍保留 unverifiable。"""
+def test_grade_verifiable_no_evidence_downgrades_not_refutes():
+    """真查无('no_evidence') ≠ 证伪:温和降级,仍保留 unverifiable。"""
+    f = _f("公司中标订单", source_kind="official_announcement")
+    level, unver = grade_fact(f, "HAS_CONFIRMED_ORDER",
+                              verify=lambda ff, p: "no_evidence")
+    assert level == "B"        # A 降一档到 B
+    assert unver is True
+
+
+def test_grade_verify_none_means_not_attempted_keeps_baseline():
+    """三态协议:verify 返回 None = 没查(异常/空桩/无验证动作)→ 保持基线不降级。
+
+    回归锚:v0.4 前 None 被当"查无"降级,空桩 verify_hooks 导致所有可验证
+    事实未经任何实查就被降档。
+    """
     f = _f("公司中标订单", source_kind="official_announcement")
     level, unver = grade_fact(f, "HAS_CONFIRMED_ORDER", verify=lambda ff, p: None)
-    assert level == "B"        # A 降一档到 B
+    assert level == "A"        # 基线保持,不因"没查"降级
     assert unver is True
 
 

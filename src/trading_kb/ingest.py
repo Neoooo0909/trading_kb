@@ -272,23 +272,24 @@ def run_ingest(limit: Optional[int] = None, llm_classify=None) -> IngestReport:
     registry = EntityRegistry(config.ENTITY_DB)
     facts = FactsStore(config.FACTS_DB)
     structure = StructureStore(config.STRUCTURE_DB)
+    try:
+        # 第一遍:收集全部 findings,拟合质疑引擎(② 乐观判定需全库分位基准)
+        cards = list(iter_cards())
+        if limit:
+            cards = cards[:limit]
+        all_findings = []
+        for card in cards:
+            all_findings.extend(card_to_findings(card))
+        critique_engine = CritiqueEngine().fit(all_findings)
 
-    # 第一遍:收集全部 findings,拟合质疑引擎(② 乐观判定需全库分位基准)
-    cards = list(iter_cards())
-    if limit:
-        cards = cards[:limit]
-    all_findings = []
-    for card in cards:
-        all_findings.extend(card_to_findings(card))
-    critique_engine = CritiqueEngine().fit(all_findings)
-
-    # 第二遍:摄入并逐条体检
-    ingestor = ResearchIngestor(registry, facts, structure,
-                                llm_classify=llm_classify, critique_engine=critique_engine)
-    report = IngestReport()
-    for card in cards:
-        ingestor.ingest_card(card, report)
-    registry.close()
-    facts.close()
-    structure.close()
-    return report
+        # 第二遍:摄入并逐条体检
+        ingestor = ResearchIngestor(registry, facts, structure,
+                                    llm_classify=llm_classify, critique_engine=critique_engine)
+        report = IngestReport()
+        for card in cards:
+            ingestor.ingest_card(card, report)
+        return report
+    finally:            # 中途异常也不漏连接(web 长驻进程反复调用,靠 GC 不可靠)
+        registry.close()
+        facts.close()
+        structure.close()

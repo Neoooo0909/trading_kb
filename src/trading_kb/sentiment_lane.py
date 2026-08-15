@@ -21,6 +21,32 @@ from .models import SentimentItem, _normalize
 _BULLISH = ["看好", "起飞", "要涨", "利好", "突破", "加仓", "强势", "牛"]
 _BEARISH = ["看空", "要跌", "利空", "减仓", "风险", "崩", "套牢", "出货"]
 
+# 行首时间戳:[2026-06-10 09:30] 内容 / 2026-06-10 09:30\t内容 / 2026-06-10 内容
+_TS_RE = re.compile(
+    r"^\s*\[?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)\]?\s*[\t,:：]?\s*(.*)$"
+)
+
+
+def parse_fragments(text: str) -> list[tuple[str, str]]:
+    """聊天/短评文本 → [(正文, 时间戳)]。cli 与 web 共用的唯一实现(ARCHITECTURE.md §2.3)。
+
+    规则:每非空行一条;行首可带时间戳(YYYY-MM-DD 选带 HH:MM[:SS]),
+    支持 `[..]`、`\\t`、`,`、`:` 等常见分隔;无时间戳则时间戳留空。
+    历史上本逻辑在 cli 与 web 各有一份,且 web 反向 import cli 借 _TS_RE 成环——
+    收编到碎片的消费方(本 lane)后环消失。
+    """
+    out: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _TS_RE.match(line)
+        if m and m.group(2).strip():        # 行首确为时间戳且后面还有正文
+            out.append((m.group(2).strip(), m.group(1)))
+        else:
+            out.append((line, ""))
+    return out
+
 
 class SentimentLane:
     """轻舆情通道。"""
@@ -32,7 +58,8 @@ class SentimentLane:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path), timeout=30)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA busy_timeout=30000")   # A2 并发
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.conn.execute("PRAGMA journal_mode=WAL")   # 读写不互斥;备份须走 sqlite3 .backup(ARCHITECTURE.md §2.4)   # A2 并发
         self._init_schema()
 
     def _init_schema(self) -> None:

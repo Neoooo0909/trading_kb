@@ -35,6 +35,30 @@ _METRIC_PATTERNS = [
     ("excess", ["超额"], False, +1),
 ]
 
+
+def _kw_matcher(kw: str):
+    """纯 ASCII 关键词编译成带词边界的正则;含中文的词保持子串匹配(返回 None)。
+
+    与 classify v2.1(2026-08-06) 同款修法:裸 "ic" 子串曾命中 price/historical
+    等英文语境,把外资行研报的目标价当 IC 值计入分布——阈值被抬到天上、
+    荒谬 doubt 随事实落库。分流器当时修了,质疑引擎漏修,2026-08-16 补齐。
+    """
+    if re.fullmatch(r"[a-z0-9_ ]+", kw):
+        return re.compile(r"(?<![a-z0-9_])" + re.escape(kw) + r"(?![a-z0-9_])")
+    return None
+
+
+# 预编译:(metric, [(matcher|None, kw)], use_abs, dir)
+_METRIC_MATCHERS = [
+    (metric, [(_kw_matcher(kw), kw) for kw in kws], use_abs, d)
+    for metric, kws, use_abs, d in _METRIC_PATTERNS
+]
+
+# 指标值域护栏:超出上限视为误抽(把价格/市值当指标),丢弃不入分布不出质疑。
+# 注意 IC 语料两种口径并存("IC均值0.05" 与 "Rank IC 9.73%"),上限取百分口径的 100。
+_METRIC_CAPS = {"ic": 100.0, "icir": 100.0, "win_rate": 100.0,
+                "sharpe": 50.0, "info_ratio": 50.0}
+
 # ── 回测软肋信号(③)────────────────────────────────────────────────────
 _BACKTEST_WORDS = ["回测", "历史表现", "样本内"]
 _OUT_OF_SAMPLE = ["样本外", "out of sample", "out-of-sample", "实盘", "滚动", "样本外验证"]
@@ -168,9 +192,13 @@ def _extract_metrics(f: Finding) -> list[tuple[str, float]]:
         val = _parse_num(n.get("value"))
         if val is None:
             continue
-        for metric, kws, use_abs, _dir in _METRIC_PATTERNS:
-            if any(kw in ctx for kw in kws):
-                out.append((metric, abs(val) if use_abs else val))
+        for metric, pairs, use_abs, _dir in _METRIC_MATCHERS:
+            if any(m.search(ctx) if m else kw in ctx for m, kw in pairs):
+                v = abs(val) if use_abs else val
+                cap = _METRIC_CAPS.get(metric)
+                if cap is not None and abs(v) > cap:
+                    break               # 值域外=误抽,该数字不再尝试其他指标
+                out.append((metric, v))
                 break
     return out
 
@@ -207,3 +235,24 @@ _METRIC_CN = {
     "annual_return": "年化收益", "icir": "ICIR", "ic": "IC",
     "info_ratio": "信息比", "sharpe": "夏普", "win_rate": "胜率", "excess": "超额收益",
 }
+
+
+def collect_doubts(rows: list[dict], top: int = 20) -> tuple[int, list]:
+    """质疑榜唯一实现(ARCHITECTURE.md §2.3):cli cmd_critique 与 web critique_payload 共用。
+
+    rows: facts.query 返回的事实行。按 doubt_severity 排序,返回 (带质疑总数,
+    [(fact_row, doubts), ...] 前 top 条)。
+    """
+    import json as _json
+    rank = {"high": 3, "medium": 2, "low": 1}
+    scored = []
+    for f in rows:
+        try:
+            extra = _json.loads(f.get("extra") or "{}")
+        except Exception:
+            extra = {}
+        doubts = extra.get("doubts") or []
+        if doubts:
+            scored.append((rank.get(extra.get("doubt_severity"), 0), f, doubts))
+    scored.sort(key=lambda x: -x[0])
+    return len(scored), [(f, d) for _, f, d in scored[:top]]

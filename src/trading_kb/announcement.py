@@ -13,14 +13,14 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
-import os
-import ssl
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -28,9 +28,6 @@ from . import config
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120 Safari/537.36")
-_CTX = ssl.create_default_context()
-_CTX.check_hostname = False
-_CTX.verify_mode = ssl.CERT_NONE
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # 直连不走代理
 
 
@@ -140,7 +137,10 @@ def _http(url: str, *, data: bytes | None = None, headers: dict, timeout: int = 
         with _OPENER.open(req, timeout=timeout) as r:
             if r.status == 200:
                 return r.read().decode("utf-8", "ignore")
-    except Exception:
+            print(f"[announcement] HTTP {r.status}: {url[:90]}", file=sys.stderr)
+    except Exception as e:
+        # 失败不抛但必须出声(§2.2 失败必须出声):风控/断网/接口改版都从这里现形
+        print(f"[announcement] 请求失败 {type(e).__name__}: {url[:90]}", file=sys.stderr)
         return None
     return None
 
@@ -205,11 +205,16 @@ def query_sse(code: str, page_size: int = 10) -> list[Announcement]:
 # ── 统一入口 ──────────────────────────────────────────────────────────────
 def fetch_announcements(name: str = "", code: str = "", limit: int = 10,
                         category: str = "") -> list[Announcement]:
-    """抓公告(已分类)。巨潮主 + 沪市兜底上交所;category 非空时按大类过滤。"""
+    """抓公告(已分类)。巨潮主 + 沪市兜底上交所;category 非空时按大类过滤。
+
+    category 过滤是取回后本地过滤:此时按 5 倍(至少 50 条)抓取再筛,
+    避免目标大类不在最近 N 条内就空手而归(召回被静默压低)。
+    """
     plate = _plate_of(code)
-    anns = query_cninfo(keyword=name, code=code, plate=plate, page_size=limit)
+    page_size = max(limit * 5, 50) if category else limit
+    anns = query_cninfo(keyword=name, code=code, plate=plate, page_size=page_size)
     if not anns and plate == "sh" and code:
-        anns = query_sse(_digits(code))
+        anns = query_sse(_digits(code), page_size=page_size)
     if category:
         anns = [a for a in anns if a.category == category]
     return anns[:limit]
@@ -217,8 +222,13 @@ def fetch_announcements(name: str = "", code: str = "", limit: int = 10,
 
 def has_announcement(name: str = "", code: str = "", keyword: str = "",
                      category: str = "") -> bool:
-    """是否存在(含关键词/指定大类的)公告 —— 供 web_enrich 验成色。"""
-    anns = fetch_announcements(name, code, limit=10, category=category)
+    """是否存在(含关键词/指定大类的)公告。
+
+    注意:keyword 为空时语义是"该主体存在任何公告",**不构成对具体事实的
+    确认**——成色验证一律走 web_enrich 的主题关键词判据,不要用本函数升级。
+    """
+    fetch_n = 30 if keyword else 10
+    anns = fetch_announcements(name, code, limit=fetch_n, category=category)
     if not keyword:
         return bool(anns)
     return any(keyword in a.title for a in anns)
@@ -245,7 +255,9 @@ def _download_pdf(a: Announcement) -> Optional[Path]:
         return None
     cache = config.DATA_DIR / "ann_pdf"
     cache.mkdir(parents=True, exist_ok=True)
-    fp = cache / (str(abs(hash(a.url)))[:16] + ".pdf")
+    # sha1 稳定键:str hash 每进程随机化(PYTHONHASHSEED),曾导致缓存跨进程
+    # 永不命中、同一公告反复下载、ann_pdf 无限堆重复文件
+    fp = cache / (hashlib.sha1(a.url.encode()).hexdigest()[:16] + ".pdf")
     if fp.exists() and fp.stat().st_size > 0:
         return fp
     try:
@@ -288,9 +300,14 @@ def _digits(code: str) -> str:
 
 
 def _ts_to_date(ts) -> str:
+    """cninfo 毫秒时间戳 → 北京时间日期(显式 +8,不依赖机器时区)。
+
+    历史缺陷:曾用 gmtime(UTC),北京 00:00-07:59 披露的公告(巨潮凌晨批量
+    披露很常见)日期早记一天。
+    """
     if not ts:
         return ""
     try:
-        return time.strftime("%Y-%m-%d", time.gmtime(int(ts) / 1000))
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts) / 1000 + 8 * 3600))
     except (ValueError, TypeError, OSError):
         return ""

@@ -14,9 +14,9 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from .models import Fact, EvidenceLevel
+from .models import Fact, EvidenceLevel, LEVEL_RANK
 
-_LEVEL_RANK = {"D": 0, "C": 1, "B": 2, "B+": 3, "A": 4}   # B+ 介于 B 与 A(外资行研报)
+_LEVEL_RANK = LEVEL_RANK   # 唯一定义点在 models.LEVEL_RANK;此别名兼容既有导入
 
 # search 的停用 gram:出现在极大比例事实里的 2-gram(公司名后缀/公告套词/泛化行业词),
 # 作为 LIKE 条件没有区分度、只会把 LIMIT 名额吃光。仅过滤自动切出的 gram,不影响完整词。
@@ -34,6 +34,9 @@ class FactsStore:
         self.conn = sqlite3.connect(str(db_path), timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=30000")   # A2 并发
+        # WAL:读写不互斥(每日 cron + web 常驻 + 手动 CLI 三类进程并发碰库)。
+        # 注意 WAL 库禁止裸 cp 备份,一律 sqlite3 .backup(ARCHITECTURE.md §2.4)。
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -68,11 +71,14 @@ class FactsStore:
         self.conn.commit()
 
     # ── 写入(含去重合并)─────────────────────────────────────────────────
-    def upsert(self, fact: Fact) -> str:
+    def upsert(self, fact: Fact, _depth: int = 0) -> str:
         """写入事实;dedup_key 命中则合并(累加来源/升级成色/保留时间线)。
 
         返回 fact_id。重复执行幂等(§18 deterministic id)。
+        _depth:内部递归护栏(极端"插入-删除"循环下防无限递归)。
         """
+        if _depth > 3:
+            raise sqlite3.OperationalError("facts.upsert 插入/删除竞态循环超过 3 层")
         existing = self.conn.execute(
             "SELECT * FROM facts WHERE dedup_key=?", (fact.dedup_key,)
         ).fetchone()
@@ -147,7 +153,7 @@ class FactsStore:
                 "SELECT * FROM facts WHERE dedup_key=?", (fact.dedup_key,)
             ).fetchone()
             if existing is None:                       # 期间被删,回顶层重走 INSERT 路径
-                return self.upsert(fact)
+                return self.upsert(fact, _depth + 1)
         raise sqlite3.OperationalError("facts.upsert 合并乐观重试 8 次仍冲突(并发异常)")
 
     # ── 状态变更 ──────────────────────────────────────────────────────────
@@ -160,12 +166,10 @@ class FactsStore:
         if new_fact.fact_id == old_fact_id:
             # 同一论断再次确认:不自我替代,走 upsert 的复活+合并路径(见 upsert)
             return self.upsert(new_fact)
-        self.conn.execute(
-            "UPDATE facts SET status='superseded', invalid_at=? WHERE fact_id=?",
-            (at, old_fact_id),
-        )
+        # 先落新事实,再在**单事务**里"标旧 superseded + 写血缘":中途崩溃最多留下
+        # 新旧短暂并存(良性,重跑收敛),不会出现"旧已标替代、新未落库"的孤儿状态
+        # (v0.4 三段式各自 commit 的缺陷)。
         new_fact.supersedes = sorted(set(new_fact.supersedes + [old_fact_id]))
-        self.conn.commit()
         nid = self.upsert(new_fact)
         # B4:upsert 合并路径不写 supersedes 列,这里显式落库替代血缘
         existing = self.conn.execute(
@@ -173,9 +177,13 @@ class FactsStore:
         ).fetchone()
         prev = json.loads(existing["supersedes"]) if existing and existing["supersedes"] else []
         merged = sorted(set(prev) | set(new_fact.supersedes))
-        self.conn.execute("UPDATE facts SET supersedes=? WHERE fact_id=?",
-                          (json.dumps(merged, ensure_ascii=False), nid))
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE facts SET status='superseded', invalid_at=? WHERE fact_id=?",
+                (at, old_fact_id),
+            )
+            self.conn.execute("UPDATE facts SET supersedes=? WHERE fact_id=?",
+                              (json.dumps(merged, ensure_ascii=False), nid))
         return nid
 
     def contradict(self, target_fact_id: str, at: str, by_source: str = "") -> None:
@@ -233,9 +241,10 @@ class FactsStore:
             sql += " ORDER BY COALESCE(valid_at,'') DESC, support_count DESC LIMIT ?"
         else:
             # 成色排序修正：evidence_level 是 TEXT，DESC 字符串序会把 'D' 排到 'A' 前
-            # （'D'>'C'>'B+'>'B'>'A'），与"高成色优先"意图相反。用 CASE 映射 _LEVEL_RANK。
-            sql += (" ORDER BY CASE evidence_level"
-                    " WHEN 'A' THEN 4 WHEN 'B+' THEN 3 WHEN 'B' THEN 2 WHEN 'C' THEN 1 ELSE 0 END DESC,"
+            # （'D'>'C'>'B+'>'B'>'A'），与"高成色优先"意图相反。
+            # CASE 从 models.LEVEL_RANK 程序化生成(单一定义点,加档位自动跟随)。
+            case = " ".join(f"WHEN '{lv}' THEN {rk}" for lv, rk in _LEVEL_RANK.items())
+            sql += (f" ORDER BY CASE evidence_level {case} ELSE 0 END DESC,"
                     " support_count DESC LIMIT ?")
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
@@ -321,6 +330,12 @@ class FactsStore:
             if own_txn:
                 self.conn.rollback()
             raise
+
+    def count_active(self) -> int:
+        """active/disputed 事实数(语义索引覆盖率等上层统计用,替代裸摸 conn)。"""
+        return int(self.conn.execute(
+            "SELECT COUNT(*) FROM facts WHERE status IN ('active','disputed')"
+        ).fetchone()[0])
 
     def stats(self) -> dict:
         rows = self.conn.execute(

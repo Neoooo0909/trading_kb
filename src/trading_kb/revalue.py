@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
-from datetime import date as _Date
+from datetime import date as _Date, timedelta as _TDelta
 from pathlib import Path
 from typing import Optional
 
@@ -146,7 +146,9 @@ def _fetch_beta(ft, snap: EnvSnapshot, peers: list[str] | None) -> None:
     """
     if snap.ret_10d is None:
         return
-    start = f"{_Date.today().year - 1}-11-01"          # 覆盖 >10 个交易日
+    # 只需 >10 个交易日:回看 60 个日历日足够(原写法硬编码"去年11月",8月调用会
+    # 白拉 9 个多月日线,浪费额度与耗时)
+    start = (_Date.today() - _TDelta(days=60)).isoformat()
     end = _Date.today().isoformat()
     try:                                               # 沪深300 基准(指数走 stock 收盘指标可取)
         b10 = _ret(_series(ft.hxds("000300.SH", ["ths_close_price_stock"],
@@ -295,7 +297,13 @@ def build_env(cid: str, facts: list[dict] | None = None,
     th.start()
     th.join(timeout)
     if th.is_alive():
-        snap.errors.append(f"timeout>{timeout:.0f}s(部分维度未回)")
+        # 冻结副本:daemon 线程超时后仍在往原 snap 写字段,直接渲染原对象会让
+        # 同一次问答的环境段内容取决于线程时序。浅拷贝 + 复制 errors 列表,
+        # 让渲染基于"超时判定那一刻"的快照(读写竞态窗口收敛到拷贝瞬间)。
+        import copy
+        frozen = copy.copy(snap)
+        frozen.errors = list(snap.errors) + [f"timeout>{timeout:.0f}s(部分维度未回)"]
+        snap = frozen
     if not snap.has_price() and not snap.has_val():     # 量价+估值全没 → 无重估价值
         return None
     return snap

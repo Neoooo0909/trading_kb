@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .entity_registry import EntityRegistry
-from .facts_store import FactsStore, _LEVEL_RANK
+from .facts_store import FactsStore
 from .structure_store import StructureStore
-from .models import _normalize, content_grams as _content_grams
+from .models import LEVEL_RANK as _LEVEL_RANK, _normalize, content_grams as _content_grams
 
 
 @dataclass
@@ -127,6 +127,69 @@ class AskResult:
             lines.extend(f"- {w}" for w in self.warnings)
         return "\n".join(lines)
 
+    def to_payload(self) -> dict:
+        """结构化六段的**唯一出口**(ARCHITECTURE.md §2.3),web/JSON 渲染从这里取数。
+
+        与 to_six_section 同源同口径:证据链、引用来源**完整不截断**。
+        (v0.4 的 web.ask_payload 手工拼装,带着文本版已修掉的 [:8]/[:12]
+        截断旧 bug 在跑——双实现漂移的现行证据,故收敛到此。)
+        invalidated[:5]/followup[:5] 与文本版同上限,属两端一致的展示口径。
+        """
+        import json as _json
+
+        def _extra(f):
+            try:
+                return _json.loads(f.get("extra") or "{}")
+            except Exception:
+                return {}
+
+        active = [f for f in self.facts if f["status"] == "active"]
+        out: dict = {
+            "query": self.query,
+            "canonical_id": self.canonical_id,
+            "found": bool(self.facts or self.neighbors),
+            "warnings": list(self.warnings),
+            "conclusion": None,
+            "evidence": [],
+            "doubts": [],
+            "conflicts": {
+                "disputed": [f["claim"] for f in self.facts if f["status"] == "disputed"],
+                "invalidated": [{"claim": f["claim"], "status": f["status"]}
+                                for f in self.invalidated_facts[:5]],
+            },
+            "followup": [f["claim"][:80] for f in active if f["unverifiable"]][:5],
+            "sources": sorted({s for f in active for s in _sources(f)}),
+            "neighbors": [{"rel": n.get("rel_type", ""), "name": n.get("dst", "")}
+                          for n in self.neighbors],
+            "c_grade_views": [],
+            "synthesis": None,
+        }
+        if active:
+            top = active[0]
+            out["conclusion"] = {
+                "claim": top["claim"], "level": top["evidence_level"],
+                "unverifiable": bool(top["unverifiable"]),
+                "doubt": _extra(top).get("doubt_severity"),
+            }
+        for i, f in enumerate(active, 1):
+            e = _extra(f)
+            out["evidence"].append({
+                "idx": i, "claim": f["claim"], "level": f["evidence_level"],
+                "unverifiable": bool(f["unverifiable"]),
+                "support": f["support_count"], "verified": e.get("verified_numbers", 0),
+                "doubt": e.get("doubt_severity"),
+            })
+            for d in (e.get("doubts") or []):
+                out["doubts"].append({"idx": i, "severity": d.get("severity"),
+                                      "message": d.get("message", "")})
+        for f in _low_grade_views(active):
+            e = _extra(f)
+            out["c_grade_views"].append({
+                "claim": f["claim"], "level": f["evidence_level"],
+                "unverifiable": bool(f["unverifiable"]), "doubt": e.get("doubt_severity"),
+            })
+        return out
+
 
 class AskEngine:
     """六段式检索引擎。"""
@@ -157,9 +220,7 @@ class AskEngine:
         # 本实体的全部别名(仅证券查询):用于过滤跨证券噪音(见 _rank_facts)
         ent_aliases = set()
         if cid and _is_security(cid):
-            ent_aliases = {r["alias_norm"] for r in self.registry.conn.execute(
-                "SELECT alias_norm FROM aliases WHERE canonical_id=?", (cid,)).fetchall()
-                if r["alias_norm"]}
+            ent_aliases = self.registry.aliases_of(cid)
         # 语义召回触发:无实体 **或** 定位到的是非证券概念(发现型/topic 查询)。治"存储测试设备龙头"
         # 锚到 concept 后跳过语义、池里只剩字面"存储"的募资公告、高语义的龙头股(精智达)进不来。
         # 个股/公司命中走精准快路径(其自有事实已准),不跑较重的语义召回。
@@ -291,9 +352,7 @@ class AskEngine:
         M2 修正:纯 ASCII 别名易子串误匹配('pe'⊂'performance'),故 ASCII 要求 >=4 且词边界;中文 >=2 可子串。
         """
         qn = _normalize(query)
-        rows = self.registry.conn.execute(
-            "SELECT alias_norm, canonical_id FROM aliases ORDER BY LENGTH(alias_norm) DESC"
-        ).fetchall()
+        rows = self.registry.iter_aliases()
         matches = []                              # 命中的 (alias, cid, is_security);命中的只有少数几个
         for r in rows:
             a, cid = r["alias_norm"], r["canonical_id"]
@@ -328,9 +387,7 @@ class AskEngine:
         """
         if not (2 <= len(qn) <= 8):
             return None
-        rows = self.registry.conn.execute(
-            "SELECT alias_norm, canonical_id FROM aliases WHERE LENGTH(alias_norm)=?", (len(qn),)
-        ).fetchall()
+        rows = self.registry.aliases_with_length(len(qn))
         hits = set()
         for r in rows:
             a, cid = r["alias_norm"], r["canonical_id"]
@@ -339,22 +396,6 @@ class AskEngine:
             if a != qn and sum(1 for x, y in zip(a, qn) if x != y) == 1:   # 同长度恰差1字
                 hits.add(cid)
         return next(iter(hits)) if len(hits) == 1 else None
-
-    def _keyword_facts(self, query: str, limit: int = 20) -> list[dict]:
-        """关键词检索:B2 改为 gram 重叠打分(无 jieba 也能处理无空格中文)。"""
-        qg = _content_grams(query)
-        if not qg:
-            return []
-        rows = self.facts.query(include_invalidated=False, limit=2000)
-        scored = []
-        for f in rows:
-            fg = _content_grams(f"{f['claim']} {f['object']}")
-            score = len(qg & fg)
-            if score:
-                # 命中 gram 数为主,support_count 次之
-                scored.append((score, f["support_count"], f))
-        scored.sort(key=lambda x: (-x[0], -x[1]))
-        return [f for _, _, f in scored[:limit]]
 
 
 def _diversify_by_kind(scored: list) -> list:
