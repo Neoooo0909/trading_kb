@@ -345,6 +345,31 @@ def cmd_deep(args) -> None:
     reg.close(); facts.close(); structure.close()
 
 
+def cmd_fts(args) -> None:
+    """FTS5 关键词索引(2026-08-25):build 对账(补缺+清孤儿,首建全量约 1 分钟)/ status 看覆盖。"""
+    config.ensure_data_dir()
+    facts = FactsStore(config.FACTS_DB)
+    try:
+        st = facts.fts_status()
+        if args.action == "status":
+            print("=== FTS5 关键词索引状态 ===")
+            print(f"可用: {st['ok']} | 已启用(built): {st['built']} | "
+                  f"已索引: {st['indexed']} | 应索引(active/disputed): {st['active']}")
+            if not st["ok"]:
+                print("  ✗ SQLite 无 fts5/过旧(需 >=3.43),search 走 LIKE 降级。")
+            elif not st["built"]:
+                print("  ⚠ 未启用,search 走 LIKE 降级;跑 `./tkb fts build` 全量建。")
+            elif st["indexed"] != st["active"]:
+                print(f"  ⚠ 漂移 {st['indexed'] - st['active']:+d} 条,跑 `./tkb fts build` 对账。")
+        else:
+            print(f"▶ FTS5 对账(应索引 {st['active']} 条,已索引 {st['indexed']})…"
+                  "首建约 1 分钟。", flush=True)
+            r = facts.fts_build()
+            print(f"✓ 补缺 {r['added']} 条,清孤儿 {r['removed']} 条,索引共 {r['indexed']} 条 → 已启用")
+    finally:
+        facts.close()
+
+
 def cmd_semantic(args) -> None:
     """语义索引(P0.5)：build 增量建向量 / status 看覆盖。bge 优先、model2vec 兜底。"""
     from .semantic import SemanticIndex
@@ -483,6 +508,10 @@ def main(argv=None) -> int:
     psm.add_argument("--prefer", choices=["bge", "model2vec"], default=None,
                      help="强制后端(默认自动择优:bge>model2vec)")
     psm.set_defaults(func=cmd_semantic)
+
+    pft = sub.add_parser("fts", help="关键词索引(FTS5+BM25):build 对账补建 / status 看覆盖")
+    pft.add_argument("action", choices=["build", "status"])
+    pft.set_defaults(func=cmd_fts)
 
     args = p.parse_args(argv)
     args.func(args)

@@ -93,6 +93,12 @@ class EntityRegistry:
             "SELECT alias_norm FROM aliases WHERE canonical_id=?", (canonical_id,)
         ).fetchall() if r["alias_norm"]}
 
+    def get(self, canonical_id: str) -> Optional[dict]:
+        """按 canonical_id 取实体主表一行(dict);不存在返回 None。不跟随 merged_into。"""
+        row = self.conn.execute(
+            "SELECT * FROM entities WHERE canonical_id=?", (canonical_id,)).fetchone()
+        return dict(row) if row else None
+
     def iter_aliases(self) -> list:
         """全部 (alias_norm, canonical_id),按别名长度降序(实体定位用)。"""
         return self.conn.execute(

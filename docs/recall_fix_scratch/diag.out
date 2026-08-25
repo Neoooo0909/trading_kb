@@ -1,0 +1,187 @@
+
+######## 球硅 HBM 先进封装 需求 / 球硅
+cid= company:hbm先进封装 want_sem= False
+like 400 sem 120 216.0s
+like真命中 0 sem真命中 4
+pool 521
+sem score dist: min/median/max 0.2667592167854309 0.4281836152076721 0.7634668350219727
+
+== top 12 by score ==
+#1 sc=10.10 rel=0.83 sem=0.63 lv=0.25 rec=0.80 C social_research 2026-06-12 | HBM先进封装 DRIVES A股「半导体封测」（利好）：HBM向2.5D/3D封装演进，技术升级推动先进封装产业链需求
+#2 sc=7.45 rel=1.00 sem=0.76 lv=0.25 rec=1.00 C social_research 2026-08-24 | HBM DRIVES A股「球硅」（利好）：HBM先进封装是高端化学法球硅核心应用场景，拉动亚微米及纳米级球硅需求翻倍
+#3 sc=6.64 rel=0.83 sem=0.71 lv=0.25 rec=1.00 C social_research 2026-08-24 | 预计2027年高端球硅需求分别为高速CCL对应1.64万吨，高性能先进封装EMC对应0.88万吨。
+#4 sc=6.61 rel=0.67 sem=0.67 lv=1.00 rec=0.89 A ir_interaction 2026-07-17 | 壹石通互动答复：尊敬的投资者，感谢您对公司的关注！公司高端芯片封装用low-α射线球形氧化铝产品的规划产能为200吨/年
+#5 sc=6.25 rel=0.83 sem=0.64 lv=0.25 rec=0.90 C social_research 2026-07-21 | AIDC DRIVES A股「先进封装」（利好）：AIDC与美科技巨头JV/股权投资推进，拉动HBM及先进封装配套需求
+#6 sc=6.12 rel=0.67 sem=0.71 lv=0.50 rec=0.75 B broker_research 2026-05-24 | 先进封装（CoWoS）可能使用碳化硅作为中介层，预计到2030年带来约740亿元衬底需求。
+#7 sc=6.01 rel=0.83 sem=0.65 lv=0.25 rec=0.61 C social_research 2026-04-05 | AMD VR200 BENEFITS A股「HBM/先进封装供应链」（利好）：VR200采用3nm制程、CoWoS-L双
+#8 sc=5.92 rel=0.83 sem=0.64 lv=0.25 rec=0.56 C social_research 2026-03-19 | 美光科技 (MU) BENEFITS A股「先进封装」（利好）：HBM需求带动先进封装需求，国内先进封装厂商有望受益。
+#9 sc=5.92 rel=0.67 sem=0.67 lv=0.25 rec=0.93 C social_research 2026-07-29 | 2026年全球晶圆设备+先进封装（WFE+AP）需求展望由1400亿美元+上调至低1500亿美元区间，同比增幅25%+
+#10 sc=5.85 rel=0.67 sem=0.64 lv=0.75 rec=0.47 B+ foreign_ib_research 2026-02-12 | ASE预计受益于先进封装需求，行业CoWoS产能同比增长85%
+#11 sc=5.85 rel=0.67 sem=0.69 lv=0.25 rec=0.79 C social_research 2026-06-10 | 先进封装 DRIVES A股「硅片」（利好）：2.5D等先进封装技术带来超出预期的硅片需求，该需求未纳入2019-202
+#12 sc=5.84 rel=0.67 sem=0.64 lv=0.25 rec=0.96 C social_research 2026-08-10 | AI DRIVES A股「先进封装材料」（利好）：AI需求拉动先进封装材料国产替代
+
+== 真命中在排序里的位置 ==
+#2 sc=7.45 rel=1.00 sem=0.76 lv=0.25 rec=1.00 C social_research 2026-08-24 | HBM DRIVES A股「球硅」（利好）：HBM先进封装是高端化学法球硅核心应用场景，拉动亚微米及纳米级球硅需求翻倍
+#3 sc=6.64 rel=0.83 sem=0.71 lv=0.25 rec=1.00 C social_research 2026-08-24 | 预计2027年高端球硅需求分别为高速CCL对应1.64万吨，高性能先进封装EMC对应0.88万吨。
+#24 sc=5.75 rel=0.50 sem=0.72 lv=0.25 rec=1.00 C social_research 2026-08-24 | CoWoS DRIVES A股「球硅」（利好）：CoWoS封装光罩尺寸扩大，需更多球硅用于底部填充和塑封料，带动高端球硅
+#81 sc=4.90 rel=0.67 sem=0.65 lv=0.25 rec=0.00 C social_research  | CoWoS DRIVES A股「球形硅微粉」（利好）：CoWoS封装光罩尺寸扩大和HBM堆叠数量提升，带动高纯Low-α
+
+== diversify 后前 12 ==
+#1 A ir_interaction     | 壹石通互动答复：尊敬的投资者，感谢您对公司的关注！公司高端芯片封装用low-α射线球形氧化铝产品的规划产能为200吨/年
+#2 B broker_research     | 先进封装（CoWoS）可能使用碳化硅作为中介层，预计到2030年带来约740亿元衬底需求。
+#3 B+ foreign_ib_research     | ASE预计受益于先进封装需求，行业CoWoS产能同比增长85%
+#4 C social_research     | HBM先进封装 DRIVES A股「半导体封测」（利好）：HBM向2.5D/3D封装演进，技术升级推动先进封装产业链需求
+#5 B broker_research     | 全球先进封装市场规模2024年约408亿美元，2029年预计674亿美元，CAGR为10.6%。
+#6 A ir_interaction     | 气派科技互动答复：尊敬的投资者，您好，非常感谢您的关注，2025年度公司碳化硅MOSFET芯片封装测试业务已实现持续、稳
+#7 B+ foreign_ib_research     | STMicroelectronics已进入PIC100硅光子平台的高量产阶段，该平台包含用于3D封装架构的关键组件TSV
+#8 C social_research HIT | HBM DRIVES A股「球硅」（利好）：HBM先进封装是高端化学法球硅核心应用场景，拉动亚微米及纳米级球硅需求翻倍
+#9 B broker_research     | 2025年全球先进封装市场规模约531亿美元
+#10 A ir_interaction     | 凌玮科技互动答复：您好！截至目前，公司产品未应用于TGV（玻璃通孔）封装工艺。未来，公司将加大研发投入，将自主研发与可持
+#11 C social_research HIT | 预计2027年高端球硅需求分别为高速CCL对应1.64万吨，高性能先进封装EMC对应0.88万吨。
+#12 B broker_research     | 全球OSAT行业2025年营收合计3332亿元同比增长9.9%，其中2.5D/3D先进封装需求增速远超传统封装。
+div 后真命中位置: [8, 11, 45, 99]
+
+######## 燃气轮机 数据中心 自备电源 受益标的 / 燃气轮机
+cid= company:数据中心自备电源 want_sem= False
+like 400 sem 120 2.7s
+like真命中 6 sem真命中 101
+pool 522
+sem score dist: min/median/max 0.22109098732471466 0.4040684700012207 0.701957643032074
+
+== top 12 by score ==
+#1 sc=9.29 rel=0.58 sem=0.61 lv=0.25 rec=0.81 C social_research 2026-06-15 | 数据中心自备电源 DRIVES A股「阳光电源」（利好）：全球数据中心自备电源需求增长，阳光电源提供储能配套，受益于AI
+#2 sc=8.91 rel=0.50 sem=0.57 lv=0.25 rec=0.84 C social_research 2026-06-26 | 美国新法案要求数据中心承担电网升级成本，或将推动AIDC采用自带电源/自备电厂模式
+#3 sc=6.56 rel=0.67 sem=0.69 lv=1.00 rec=0.74 A ir_interaction 2026-05-23 | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#4 sc=6.41 rel=0.67 sem=0.64 lv=1.00 rec=0.81 A ir_interaction 2026-06-15 | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#5 sc=6.30 rel=0.58 sem=0.63 lv=1.00 rec=0.99 A ir_interaction 2026-08-20 | 水发燃气互动答复：感谢您的关注，具体请参考公司定期报告经营分析等相关章节。
+#6 sc=6.27 rel=0.58 sem=0.62 lv=1.00 rec=0.99 A ir_interaction 2026-08-21 | 中国动力互动答复：您好，公司高度关注业务及产品在新领域及新场景的应用，将结合市场需求及公司实际情况，持续推动提升核心竞争
+#7 sc=6.26 rel=0.75 sem=0.68 lv=0.25 rec=0.99 C social_research 2026-08-23 | 北美AI数据中心 DRIVES A股「燃气轮机」（利好）：海外AIDC自备电源需求爆发，国产燃气轮机获得大额订单并实现批
+#8 sc=6.26 rel=0.83 sem=0.63 lv=0.25 rec=0.95 C social_research 2026-08-05 | 卡特彼勒 DRIVES A股「数据中心电源」（利好）：卡特彼勒数据中心电力业务强劲增长，印证北美数据中心自备电源需求旺盛
+#9 sc=6.16 rel=0.75 sem=0.69 lv=0.25 rec=0.84 C social_research 2026-06-29 | AI数据中心自备电源 DRIVES A股「燃气发电机组」（利好）：数据中心对燃气轮机/燃气发电机组的确定性需求，利好A股
+#10 sc=6.13 rel=0.75 sem=0.66 lv=0.25 rec=0.94 C social_research 2026-08-02 | HBM DRIVES A股「燃气轮机」（利好）：AI数据中心（HBM等算力基础设施）是北美燃机需求核心增量，全球AI数据
+#11 sc=6.08 rel=0.67 sem=0.69 lv=0.25 rec=0.98 C social_research 2026-08-17 | 美国 DRIVES A股「燃气轮机」（利好）：美国数据中心用电限制和自备电要求推动燃气轮机需求，利好国内燃气轮机产业链
+#12 sc=6.03 rel=0.50 sem=0.65 lv=1.00 rec=0.90 A ir_interaction 2026-07-20 | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃机能够适用于分布式能源、区域热电联产、数据中心等多种应用场景。公司正积极地
+
+== 真命中在排序里的位置 ==
+#3 sc=6.56 rel=0.67 sem=0.69 lv=1.00 rec=0.74 A ir_interaction 2026-05-23 | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#4 sc=6.41 rel=0.67 sem=0.64 lv=1.00 rec=0.81 A ir_interaction 2026-06-15 | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#7 sc=6.26 rel=0.75 sem=0.68 lv=0.25 rec=0.99 C social_research 2026-08-23 | 北美AI数据中心 DRIVES A股「燃气轮机」（利好）：海外AIDC自备电源需求爆发，国产燃气轮机获得大额订单并实现批
+#8 sc=6.26 rel=0.83 sem=0.63 lv=0.25 rec=0.95 C social_research 2026-08-05 | 卡特彼勒 DRIVES A股「数据中心电源」（利好）：卡特彼勒数据中心电力业务强劲增长，印证北美数据中心自备电源需求旺盛
+#9 sc=6.16 rel=0.75 sem=0.69 lv=0.25 rec=0.84 C social_research 2026-06-29 | AI数据中心自备电源 DRIVES A股「燃气发电机组」（利好）：数据中心对燃气轮机/燃气发电机组的确定性需求，利好A股
+#10 sc=6.13 rel=0.75 sem=0.66 lv=0.25 rec=0.94 C social_research 2026-08-02 | HBM DRIVES A股「燃气轮机」（利好）：AI数据中心（HBM等算力基础设施）是北美燃机需求核心增量，全球AI数据
+#11 sc=6.08 rel=0.67 sem=0.69 lv=0.25 rec=0.98 C social_research 2026-08-17 | 美国 DRIVES A股「燃气轮机」（利好）：美国数据中心用电限制和自备电要求推动燃气轮机需求，利好国内燃气轮机产业链
+#13 sc=5.96 rel=0.58 sem=0.67 lv=0.50 rec=0.98 B broker_research 2026-08-18 | 燃气轮机作为数据中心主电源，存量市场规模约4500亿元，预计到28-30年达五六千亿元
+#14 sc=5.86 rel=0.58 sem=0.63 lv=1.00 rec=0.54 A ir_interaction 2026-03-11 | 豪迈科技互动答复：您好，公司大型零部件机械产品以风电、燃气轮机等能源类产品零部件的铸造及精加工为主，相关客户和产品情况请
+#15 sc=5.84 rel=0.58 sem=0.70 lv=0.25 rec=0.94 C social_research 2026-08-02 | PJM DRIVES A股「燃气轮机」（利好）：PJM新规要求数据中心自带电源，直接利好燃气轮机新建需求
+#16 sc=5.81 rel=0.58 sem=0.66 lv=0.50 rec=0.87 B broker_research 2026-07-07 | 国内燃气轮机产业链公司受益于海外数据中心需求
+#18 sc=5.75 rel=0.50 sem=0.63 lv=0.75 rec=0.95 B+ foreign_ib_research 2026-08-07 | 受AI数据中心需求驱动，燃气轮机业务毛利润预计2025-2028年实现286%的复合年增长率。
+#19 sc=5.74 rel=0.67 sem=0.64 lv=0.25 rec=0.89 C social_research 2026-07-15 | 美国数据中心 BENEFITS A股「燃机链」（利好）：美国数据中心建设因电力缺口被叫停，推动北美缺电加剧，刺激燃气轮机
+#20 sc=5.73 rel=0.67 sem=0.63 lv=0.25 rec=0.91 C social_research 2026-07-23 | 北美云服务商 SUPPLIES_TO A股「燃气轮机发电」（利好）：北美数据中心建设以燃气轮机发电机组为核心电源，中国厂
+#21 sc=5.72 rel=0.67 sem=0.69 lv=0.25 rec=0.65 C social_research 2026-04-20 | 燃气轮机 SUPPLIES_TO A股「电力设备」（利好）：燃气轮机用于数据中心备用电源，北美AI建设增加数据中心电力需
+#22 sc=5.63 rel=0.58 sem=0.66 lv=0.25 rec=0.53 C social_research 2026-03-06 | 数据中心 DRIVES A股「燃气轮机」（利好）：海外数据中心用燃气轮机占比提升，拉动燃气轮机新增装机，A股应流股份、万
+#23 sc=5.60 rel=0.58 sem=0.65 lv=0.25 rec=0.95 C social_research 2026-08-05 | 卡特彼勒 DRIVES A股「燃气轮机」（利好）：卡特彼勒数据中心发电需求强劲，拉动燃气轮机产业链景气，A股相关环节受益
+#24 sc=5.59 rel=0.75 sem=0.70 lv=0.50 rec=0.00 B broker_research  | 燃气轮机作为数据中心自备电源的快速解决方案，需求旺盛，但全球产能仅约100吉瓦/年，远不能满足年均近100吉瓦的需求缺口
+#25 sc=5.59 rel=0.58 sem=0.64 lv=0.25 rec=0.95 C social_research 2026-08-05 | 卡特彼勒 MIRRORS A股「燃气轮机」（利好）：卡特彼勒数据中心发电需求强劲，订单排至2029年，A股燃气轮机相关公
+#26 sc=5.58 rel=0.50 sem=0.63 lv=1.00 rec=0.52 A ir_interaction 2026-03-02 | 中国动力互动答复：尊敬的投资者，您好！目前公司燃气轮机产品暂未应用在数据中心领域，如有进展，将严格按要求履行信息披露义务
+#27 sc=5.58 rel=0.58 sem=0.64 lv=0.25 rec=0.96 C social_research 2026-08-11 | AIDC电源 DRIVES A股「燃气轮机」（利好）：AIDC电力短缺推动数据中心电源需求，中国燃气轮机厂商有机会进入海
+#28 sc=5.55 rel=0.58 sem=0.63 lv=0.25 rec=0.98 C social_research 2026-08-18 | AI数据中心 DRIVES A股「燃机集成」（利好）：AI数据中心对电力需求爆发，燃气轮机组作为供电设备需求上升，杰瑞股
+#30 sc=5.51 rel=0.58 sem=0.64 lv=0.25 rec=0.90 C social_research 2026-07-19 | 数据中心 DRIVES A股「汽轮科技」（利好）：美国数据中心用电需求快速增长，自建电站需求加速释放，拉动燃气轮机需求，
+#31 sc=5.50 rel=0.75 sem=0.66 lv=0.25 rec=0.27 C social_research 2025-12-02 | Caterpillar SUPPLIES_TO A股「燃气轮机」（利好）：Caterpillar涡轮机用于数据中心自备电
+#32 sc=5.48 rel=0.50 sem=0.65 lv=0.50 rec=0.85 B broker_research 2026-07-02 | 数据中心对燃气轮机产能的需求日益增长，但受限于频率和规格，产能无法直接通用
+#33 sc=5.48 rel=0.50 sem=0.65 lv=0.50 rec=0.85 B broker_research 2026-07-02 | 数据中心对燃气轮机产能的需求日益增长，但受限于频率和规格，产能无法直接通用
+#34 sc=5.48 rel=0.58 sem=0.63 lv=0.25 rec=0.92 C social_research 2026-07-27 | 美国数据中心 DRIVES A股「燃气轮机整机」（利好）：美国数据中心基建拉动燃气轮机发电需求，安萨尔多获德州8台订单、
+#35 sc=5.44 rel=0.58 sem=0.63 lv=0.25 rec=0.41 C social_research 2026-01-21 | GE Vernova BENEFITS A股「燃气轮机」（利好）：AI数据中心电力需求推动燃气轮机需求，GEV订单排到2
+#36 sc=5.43 rel=0.58 sem=0.62 lv=0.25 rec=0.91 C social_research 2026-07-22 | 瓦锡兰 DRIVES A股「机头」（利好）：瓦锡兰数据中心电站大量采用50SG/34SG燃气机组，需求外溢形成机头（燃气
+#37 sc=5.43 rel=0.50 sem=0.65 lv=0.25 rec=0.92 C social_research 2026-07-27 | 美国数据中心 DRIVES A股「燃气轮机」（利好）：美国大型数据中心基建加速带动燃气轮机发电设备采购，海外需求外溢利好
+#38 sc=5.42 rel=0.50 sem=0.63 lv=0.50 rec=0.83 B broker_research 2026-06-25 | 数据中心建设带动全球发电设备需求提升，燃气轮机与柴油发电机组龙头在手订单饱满，且纷纷开启扩产规划。
+#39 sc=5.39 rel=0.50 sem=0.65 lv=0.25 rec=1.00 C social_research 2026-08-24 | 数据中心电力 DRIVES A股「燃气轮机」（利好）：海外数据中心电力投资增加，带动燃气轮机需求，利好国内相关产业链
+#40 sc=5.38 rel=0.58 sem=0.62 lv=0.25 rec=0.85 C social_research 2026-07-01 | GE Vernova DRIVES A股「AIDC」（利好）：海外数据中心巨头采用气电，拉动燃气轮机需求，A股AIDC供
+#41 sc=5.37 rel=0.58 sem=0.65 lv=0.25 rec=0.72 C social_research 2026-05-14 | 数据中心 BENEFITS A股「燃气轮机/电力设备」（利好）：算力基建向重燃赛道渗透趋势确立，斗山3.8吉瓦中2.7吉
+#43 sc=5.36 rel=0.58 sem=0.63 lv=0.25 rec=0.78 C social_research 2026-06-04 | AI数据中心 DRIVES A股「重型燃机」（利好）：全球AI数据中心扩建驱动燃气轮机需求进入新一轮景气周期，供给端订单
+#44 sc=5.32 rel=0.50 sem=0.66 lv=0.25 rec=0.88 C social_research 2026-07-12 | 陡山能源 DRIVES A股「燃气轮机」（利好）：陡山能源燃机订单七成供给北美数据中心，AI数据中心拉动燃机需求，利好A
+#45 sc=5.32 rel=0.67 sem=0.62 lv=0.25 rec=0.53 C social_research 2026-03-05 | 美国七大科技巨头 DRIVES A股「燃气轮机」（利好）：美国科技巨头签署自主供电承诺，推动数据中心自建/购买发电设施，
+#46 sc=5.31 rel=0.50 sem=0.65 lv=0.25 rec=0.91 C social_research 2026-07-22 | 天然气发电 DRIVES A股「燃气轮机/发电设备」（利好）：数据中心依赖天然气涡轮机补电并与Solaris建永久燃气电
+#47 sc=5.31 rel=0.58 sem=0.65 lv=0.25 rec=0.65 C social_research 2026-04-20 | BKR (Baker Hughes) SUPPLIES_TO A股「燃气轮机」（利好）：BKR获得AI数据中心发电机订单
+#48 sc=5.30 rel=0.67 sem=0.63 lv=0.25 rec=0.50 C social_research 2026-02-24 | 数据中心能源设备 BENEFITS A股「数据中心电源」（利好）：海外数据中心对能源发电设备需求增长（如燃气轮机、燃料电
+#49 sc=5.29 rel=0.50 sem=0.64 lv=0.25 rec=0.93 C social_research 2026-07-31 | 北美数据中心 DRIVES A股「燃气轮机发电」（利好）：北美AIDC用电需求拉动燃气轮机发电机组订单，公司完成海外首单
+#50 sc=5.28 rel=0.58 sem=0.66 lv=0.25 rec=0.60 C social_research 2026-03-31 | 燃气轮机 SUPPLIES_TO A股「数据中心」（利空）：全球燃气轮机紧缺倒逼改装航空发动机，国内数据中心若布局自备发
+#51 sc=5.26 rel=0.50 sem=0.63 lv=0.25 rec=0.95 C social_research 2026-08-05 | 燃气轮机产能扩张至2024年的2.5倍目标，以应对数据中心需求
+#52 sc=5.26 rel=0.50 sem=0.65 lv=0.25 rec=0.88 C social_research 2026-07-12 | 海外燃气轮机 DRIVES A股「铬盐」（利好）：AI数据中心电力需求带来燃气轮机大幅增长，驱动铬盐需求高增
+#53 sc=5.26 rel=0.50 sem=0.64 lv=0.25 rec=0.92 C social_research 2026-07-26 | GEV数据中心订单YTD超50亿美元为2025全年两倍，燃气轮机与电网设备订单高增、交付剪刀差扩大
+#54 sc=5.25 rel=0.50 sem=0.64 lv=0.25 rec=0.84 C social_research 2026-06-29 | 北美数据中心 DRIVES A股「燃气轮机」（利好）：北美数据中心燃机需求占比达30-35%并继续提升，带动A股燃机相关
+#56 sc=5.21 rel=0.58 sem=0.66 lv=0.25 rec=0.53 C social_research 2026-03-07 | 美国AI数据中心自供电政策 DRIVES A股「燃机链」（利好）：美国多项政策强制/引导AI数据中心自建电厂或直连发电厂
+#57 sc=5.19 rel=0.58 sem=0.63 lv=0.25 rec=0.62 C social_research 2026-04-07 | 美国AI数据中心 DRIVES A股「燃气轮机」（利好）：AI用电刚性需求带动北美天然气资本开支上行，燃气轮机板块中长期
+#58 sc=5.19 rel=0.58 sem=0.62 lv=0.25 rec=0.66 C social_research 2026-04-23 | AI数据中心建设带动燃气轮机需求，国际巨头订单激增并扩产，国内燃机产业链充分受益
+#59 sc=5.19 rel=0.58 sem=0.65 lv=0.25 rec=0.52 C social_research 2026-03-03 | 美国AI数据中心电力需求 DRIVES A股「燃气轮机」（利好）：美国AI数据中心电力短缺推动燃气轮机需求大增，中国企业
+#60 sc=5.17 rel=0.50 sem=0.63 lv=0.25 rec=0.55 C social_research 2026-03-13 | AIDC DRIVES A股「燃气轮机」（利好）：AI数据中心扩建为燃气轮机需求核心增量，预计带来160亿美元+装机规模
+#61 sc=5.16 rel=0.58 sem=0.63 lv=0.25 rec=0.58 C social_research 2026-03-26 | US Power Grid Expansion Lag DRIVES A股「燃气轮机/分布式能源/微网」（利好）：美国电
+#62 sc=5.13 rel=0.58 sem=0.64 lv=0.25 rec=0.53 C social_research 2026-03-05 | 燃气轮机 BENEFITS A股「银轮股份」（利好）：海外数据中心主电源和备用电源需求快速增长，银轮股份产品覆盖冷却包和
+#63 sc=5.12 rel=0.50 sem=0.65 lv=0.25 rec=0.74 C social_research 2026-05-21 | 欧洲AI数据中心 DRIVES A股「燃气轮机」（利好）：欧洲AI电力需求预计168TWh，数据中心将采用天然气供电，推
+#64 sc=5.11 rel=0.58 sem=0.64 lv=0.25 rec=0.41 C social_research 2026-01-21 | Doosan Enerbility MIRRORS A股「燃气轮机」（利好）：Doosan燃气轮机供应数据中心映射燃气轮
+#66 sc=5.07 rel=0.50 sem=0.64 lv=0.25 rec=0.73 C social_research 2026-05-18 | US DRIVES A股「燃气轮机」（利好）：北美数据中心燃气轮机订单，需求拉动A股燃气轮机环节
+#67 sc=5.07 rel=0.58 sem=0.63 lv=0.75 rec=0.00 B+ foreign_ib_research  | 劳斯莱斯提供重型燃气轮机（3-107MW）、SOFC、SMR（77MW）等电源方案。2025年上半年数据中心电源订单同比
+#68 sc=5.06 rel=0.50 sem=0.69 lv=0.25 rec=0.50 C social_research 2026-02-24 | 美国电力缺口显著，激励数据中心自建燃气轮机供电
+#69 sc=5.04 rel=0.58 sem=0.65 lv=0.25 rec=0.41 C social_research 2026-01-21 | Boom Supersonic BENEFITS A股「燃气轮机」（利好）：Boom Supersonic获Crusoe
+#70 sc=5.04 rel=0.50 sem=0.62 lv=0.25 rec=0.76 C social_research 2026-05-28 | gas turbine DRIVES A股「燃气轮机组件」（利好）：AI数据中心基荷电力需求拉动燃气轮机需求，利好A股燃
+#71 sc=5.02 rel=0.50 sem=0.62 lv=0.25 rec=0.72 C social_research 2026-05-14 | Doosan DRIVES A股「燃气轮机」（利好）：Doosan创纪录订单表明数据中心需求拉动燃气轮机市场，利好A股相
+#72 sc=4.98 rel=0.58 sem=0.67 lv=0.50 rec=0.00 B broker_research  | 数据中心规模扩张推动美国电力需求提升，燃气轮机成为数据中心主电源首选
+#76 sc=4.95 rel=0.50 sem=0.63 lv=0.25 rec=0.64 C social_research 2026-04-17 | 海外AIDC DRIVES A股「燃气轮机」（利好）：海外AI数据中心建设导致电力需求激增，燃机设备供不应求，国内燃气轮
+#77 sc=4.95 rel=0.50 sem=0.65 lv=0.25 rec=0.54 C social_research 2026-03-11 | AIDC数据中心 DRIVES A股「燃气轮机」（利好）：AIDC数据中心建设增加电力需求，重型燃机为最优发电方案，拉动
+#78 sc=4.91 rel=0.58 sem=0.67 lv=0.25 rec=0.18 C social_research 2025-10-31 | Solar Turbines DRIVES A股「燃气轮机」（利好）：美国数据中心大量采用燃气轮机发电，带动全球燃气轮机
+#79 sc=4.88 rel=0.50 sem=0.66 lv=0.25 rec=0.43 C social_research 2026-01-29 | Nvidia BENEFITS A股「燃气轮机」（利好）：Nvidia高功率数据中心需要现场发电
+#80 sc=4.88 rel=0.50 sem=0.64 lv=0.75 rec=0.00 B+ foreign_ib_research  | 数据中心是燃气轮机第二大终端市场，西门子能源FY25订单中约21%直接来自数据中心。
+#81 sc=4.83 rel=0.50 sem=0.63 lv=0.75 rec=0.00 B+ foreign_ib_research  | 个别数据中心项目燃气轮机价格涨幅约50%，成为新常态。
+#82 sc=4.82 rel=0.50 sem=0.66 lv=0.25 rec=0.38 C social_research 2026-01-12 | 美国电力公司 DRIVES A股「燃气轮机」（利好）：美国电力公司行使900兆瓦期权扩容，数据中心用电需求拉动燃气轮机订
+#83 sc=4.78 rel=0.58 sem=0.62 lv=0.50 rec=0.00 B broker_research  | 燃气轮机受益于AI数据中心需求，全球市场长期由国际巨头垄断，订单交付周期已延至2029-2030年
+#84 sc=4.77 rel=0.50 sem=0.63 lv=0.25 rec=0.44 C social_research 2026-02-02 | 备克 DRIVES A股「燃气轮机发电机组」（利好）：备克上调数据中心燃机订单指引至30亿美金，反映AI数据中心电力需求
+#86 sc=4.74 rel=0.50 sem=0.62 lv=0.25 rec=0.00 C social_research 2025-01-22 | AI数据中心 DRIVES A股「燃气轮机」（利好）：北美AI数据中心建设对燃气轮机发电需求增长，杰瑞股份等A股燃机企业
+#87 sc=4.73 rel=0.50 sem=0.63 lv=0.25 rec=0.40 C social_research 2026-01-17 | 燃气轮机 BENEFITS A股「中国供应商」（利好）：数据中心巨头自建局部发电基础设施拉动燃气轮机需求，利好中国供应链
+#88 sc=4.72 rel=0.50 sem=0.62 lv=0.25 rec=0.43 C social_research 2026-01-29 | GE SUPPLIES_TO A股「燃机」（利好）：GE燃气轮机用于数据中心供电，利好A股燃气轮机相关零部件企业。
+#89 sc=4.67 rel=0.50 sem=0.65 lv=0.50 rec=0.00 B broker_research  | 燃气轮机锻件受AI数据中心驱动迎来高景气周期，头部企业订单饱满。
+#90 sc=4.66 rel=0.50 sem=0.65 lv=0.50 rec=0.00 B broker_research  | S&P Global预计2030之前新增的数据中心供电量中，燃气轮机联合循环气电占比40%，容量系数为70%
+#91 sc=4.62 rel=0.58 sem=0.64 lv=0.25 rec=0.00 C social_research  | GE Vernova SUPPLIES_TO A股「燃气轮机/电力设备」（利好）：GE Vernova产能被数据中心签约
+#92 sc=4.62 rel=0.50 sem=0.64 lv=0.50 rec=0.00 B broker_research  | 数据中心爆发式增长推动燃气轮机需求，公司燃气轮机营收同比增长38%
+#93 sc=4.61 rel=0.58 sem=0.64 lv=0.25 rec=0.00 C social_research  | SpaceX DRIVES A股「AI数据中心」（利好）：SpaceX大规模AI数据中心需求拉动电力基础设施投资，A股电
+#94 sc=4.61 rel=0.50 sem=0.64 lv=0.50 rec=0.00 B broker_research 2025-02-11 | 全球数据中心大规模扩张直接导致电力需求高增，燃气轮机在北美供电占比45%到50%，是数据中心重要供电方案。
+#95 sc=4.59 rel=0.50 sem=0.64 lv=0.50 rec=0.00 B broker_research  | 燃气轮机在美国数据中心供电结构中的占比有望从2024年的40%提升至2035年的50%以上
+#96 sc=4.58 rel=0.50 sem=0.63 lv=0.50 rec=0.00 B broker_research  | 燃气轮机发电机组突破北美数据中心客户，发电业务打造第三增长极
+#97 sc=4.58 rel=0.50 sem=0.63 lv=0.50 rec=0.00 B broker_research  | 数据中心带动燃气轮机强劲需求，公司计划到2027年产能提升30%至22GW
+#98 sc=4.57 rel=0.58 sem=0.63 lv=0.25 rec=0.00 C social_research 2025-01-16 | AI数据中心 DRIVES A股「燃气轮机叶片」（利好）：AI算力中心需求拉动燃气轮机订单增长，叶片作为核心部件受益。
+#101 sc=4.56 rel=0.50 sem=0.63 lv=0.50 rec=0.00 B broker_research  | Howmet燃气轮机业务受数据中心需求驱动，预计未来3-5年内营收翻倍至20亿美元。
+#102 sc=4.55 rel=0.25 sem=0.62 lv=0.25 rec=0.97 C social_research 2026-08-13 | Bloom Energy BENEFITS A股「燃气轮机」（利好）：美国电力短缺，促使采用天然气涡轮机，相关设备需求增
+#103 sc=4.54 rel=0.58 sem=0.62 lv=0.25 rec=0.00 C social_research  | AI基建 DRIVES A股「燃气轮机」（利好）：AI数据中心对高可靠低碳电力需求迫切，燃气发电凭借调节能力强、效率高等
+#104 sc=4.54 rel=0.58 sem=0.62 lv=0.25 rec=0.00 C social_research  | 天然气轮机 MIRRORS A股「燃机」（利好）：美国天然气轮机作为快速电力解决方案需求上升，A股燃气轮机厂商有望受益于
+#105 sc=4.53 rel=0.58 sem=0.62 lv=0.25 rec=0.00 C social_research  | 美国数据中心 BENEFITS A股「东方电气」（利好）：东方电气受益于北美数据中心客户对燃气轮机需求的上升。
+#106 sc=4.53 rel=0.58 sem=0.62 lv=0.25 rec=0.00 C social_research  | 美国超大规模数据中心 DRIVES A股「燃气轮机」（利好）：美国AI数据中心资本支出加速，拉动燃气轮机需求，中国OEM
+#107 sc=4.53 rel=0.50 sem=0.62 lv=0.50 rec=0.00 B broker_research  | 燃气轮机率先走强，受AI数据中心扩张引发订单潮驱动
+#108 sc=4.53 rel=0.50 sem=0.62 lv=0.50 rec=0.00 B broker_research  | 燃气轮机是北美数据中心自主供电主流选择，东方电气掌握核心技术
+#110 sc=4.48 rel=0.50 sem=0.67 lv=0.25 rec=0.00 C social_research  | Entergy Louisiana DRIVES A股「燃气轮机」（利好）：为Meta数据中心配套燃机，反映美国数据中心
+#111 sc=4.43 rel=0.25 sem=0.62 lv=0.25 rec=0.91 C social_research 2026-07-22 | 截至目前燃气轮机合计签单26亿美元，26年签单规模超上调后指引，后续跟踪订单充足
+#114 sc=4.38 rel=0.50 sem=0.65 lv=0.25 rec=0.00 C social_research  | GV DRIVES A股「燃气轮机」（利好）：GV电力设备订单高增，燃气轮机订单翻倍，体现海外AI数据中心对燃机需求拉动
+#115 sc=4.37 rel=0.50 sem=0.64 lv=0.25 rec=0.00 C social_research  | 燃气轮机 DRIVES A股「电力设备」（利好）：全球数据中心扩张推动燃气轮机需求，利好A股电力设备出口产业链
+#116 sc=4.34 rel=0.50 sem=0.63 lv=0.25 rec=0.00 C social_research  | AI data center DRIVES A股「Gas turbine」（利好）：美国AI数据中心增量电力需求最多60
+#118 sc=4.32 rel=0.50 sem=0.63 lv=0.25 rec=0.00 C social_research  | Gartner DRIVES A股「燃气轮机」（利好）：Gartner预测数据中心用电量增长拉动燃气轮机新增市场空间
+#119 sc=4.31 rel=0.50 sem=0.63 lv=0.25 rec=0.00 C social_research  | AI data center DRIVES A股「Himile」（利好）：AI数据中心基荷电力需求驱动燃气轮机需求，提升
+#120 sc=4.31 rel=0.50 sem=0.63 lv=0.25 rec=0.00 C social_research  | Synapse Data Center DRIVES A股「燃气轮机」（利好）：Synapse数据中心向东方电气采购10
+#121 sc=4.25 rel=0.58 sem=0.55 lv=0.25 rec=0.00 C social_research 2025-04-10 | 数据中心发电机组 BENEFITS A股「杰瑞股份」（利好）：公司积极拓展AIDC燃气轮机发电机组业务，预计2025年底
+#126 sc=4.06 rel=0.25 sem=0.62 lv=0.25 rec=0.53 C social_research 2026-03-07 | 北美电网投资 BENEFITS A股「燃气轮机」（利好）：AI厂商自建发电方案带动燃气轮机需求
+#139 sc=3.61 rel=0.33 sem=0.58 lv=0.25 rec=0.00 C social_research 2025-01-08 | AIDC DRIVES A股「柴发」（利好）：AIDC需求爆发，燃气轮机为主电源，柴发作为备用电源，互为补充
+#172 sc=3.27 rel=0.25 sem=0.56 lv=0.25 rec=0.00 C social_research 2025-01-08 | 燃气轮机供应链涨价，国产配套潜在机遇大
+#175 sc=3.24 rel=0.25 sem=0.55 lv=0.25 rec=0.00 C social_research 2025-01-20 | 燃气轮机头部企业在手订单排至28年，行业景气度高
+#185 sc=3.16 rel=0.25 sem=0.53 lv=0.25 rec=0.00 C social_research 2025-01-23 | 星际之门 DRIVES A股「燃气轮机」（利好）：北美电力结构依赖燃气轮机，星际之门项目带动燃气轮机需求
+#190 sc=3.13 rel=0.25 sem=0.52 lv=0.25 rec=0.00 C social_research 2025-02-22 | GE DRIVES A股「华锐精密」（利好）：GE同步推进燃气轮机叶片加工合作，带动华锐精密海外收入
+
+== diversify 后前 12 ==
+#1 A ir_interaction HIT | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#2 B broker_research HIT | 燃气轮机作为数据中心主电源，存量市场规模约4500亿元，预计到28-30年达五六千亿元
+#3 B+ foreign_ib_research HIT | 受AI数据中心需求驱动，燃气轮机业务毛利润预计2025-2028年实现286%的复合年增长率。
+#4 C social_research     | 数据中心自备电源 DRIVES A股「阳光电源」（利好）：全球数据中心自备电源需求增长，阳光电源提供储能配套，受益于AI
+#5 A ir_interaction HIT | 汽轮科技互动答复：尊敬的投资者您好，公司自主燃气轮机可用于包括数据中心电站在内的分布式能源发电、热电联产、企业自备电站等
+#6 B broker_research HIT | 国内燃气轮机产业链公司受益于海外数据中心需求
+#7 B+ foreign_ib_research HIT | 劳斯莱斯提供重型燃气轮机（3-107MW）、SOFC、SMR（77MW）等电源方案。2025年上半年数据中心电源订单同比
+#8 C social_research     | 美国新法案要求数据中心承担电网升级成本，或将推动AIDC采用自带电源/自备电厂模式
+#9 A ir_interaction     | 水发燃气互动答复：感谢您的关注，具体请参考公司定期报告经营分析等相关章节。
+#10 B broker_research HIT | 燃气轮机作为数据中心自备电源的快速解决方案，需求旺盛，但全球产能仅约100吉瓦/年，远不能满足年均近100吉瓦的需求缺口
+#11 B+ foreign_ib_research HIT | 数据中心是燃气轮机第二大终端市场，西门子能源FY25订单中约21%直接来自数据中心。
+#12 C social_research HIT | 北美AI数据中心 DRIVES A股「燃气轮机」（利好）：海外AIDC自备电源需求爆发，国产燃气轮机获得大额订单并实现批
+div 后真命中位置: [1, 2, 3, 5, 6, 7, 10, 11, 12, 14, 15, 16, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 44, 45, 47, 48, 49, 50, 52, 54, 55, 56, 57, 58, 59, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 92, 93, 94, 95, 96, 97, 99, 100, 101, 102, 103, 104, 106, 107, 108, 109, 110, 112, 113, 115, 116, 117, 118, 119, 120, 121, 126, 139, 172, 175, 185, 190]

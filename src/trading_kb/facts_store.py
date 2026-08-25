@@ -10,11 +10,15 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional
 
-from .models import Fact, EvidenceLevel, LEVEL_RANK
+from .models import Fact, EvidenceLevel, LEVEL_RANK, content_grams
+
+_WARNED: set = set()      # 进程内只出声一次的降级告警(§2.2 出声,但别刷屏)
 
 _LEVEL_RANK = LEVEL_RANK   # 唯一定义点在 models.LEVEL_RANK;此别名兼容既有导入
 
@@ -37,7 +41,9 @@ class FactsStore:
         # WAL:读写不互斥(每日 cron + web 常驻 + 手动 CLI 三类进程并发碰库)。
         # 注意 WAL 库禁止裸 cp 备份,一律 sqlite3 .backup(ARCHITECTURE.md §2.4)。
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._fts_ok = False
         self._init_schema()
+        self._init_fts()
 
     def _init_schema(self) -> None:
         self.conn.executescript(
@@ -66,9 +72,161 @@ class FactsStore:
             CREATE INDEX IF NOT EXISTS idx_facts_cid ON facts(canonical_id);
             CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
             CREATE INDEX IF NOT EXISTS idx_facts_pred ON facts(predicate);
+            -- FTS5 关键词索引的旁表(2026-08-25):fts_map 把 FTS rowid 映射到 fact_id
+            -- (故意不用 facts.rowid:TEXT 主键表的 rowid 会被 VACUUM 重编);fts_meta 记
+            -- "索引是否已全量建成"——半建索引绝不能冒充全量参与检索。
+            CREATE TABLE IF NOT EXISTS fts_map (
+                id       INTEGER PRIMARY KEY,
+                fact_id  TEXT UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS fts_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
             """
         )
         self.conn.commit()
+
+    # ── FTS5 关键词索引(P0-B,2026-08-25,docs/RECALL_FIX_PLAN_20260825.md)──────
+    # 旧 search 是 LIKE 全表扫:"需求"这类高频 gram 单独命中 6 万行,ORDER BY rowid DESC
+    # LIMIT 400 被最新入库的无关事实灌满(实测球硅查询 0/400),且截断早于相关性排序;
+    # 单 token LIKE 全扫 110 万行要 14~28s,LIKE 路线不可改良。改为 content_grams 预切
+    # 2-gram 空格连接 → unicode61 分词(每个 gram 一个 token)+ bm25 排序:截断发生在相关性
+    # 之后,IDF 自动压低高频词。不用 FTS5 自带 trigram:它对 <3 字的子串一律不命中,而
+    # "球硅/燃机/HBM"这类 2 字词正是 A 股语料主力。
+    def _init_fts(self) -> None:
+        """建 FTS5 表(contentless + contentless_delete,需 SQLite>=3.43);不可用 → LIKE 降级并出声。
+        空库(新建/测试)直接标 built:此后每条 upsert 同事务写索引,索引从一开始就完整;
+        存量库须 `tkb fts build` 全量对账后才启用。"""
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5("
+                "grams, content='', contentless_delete=1, tokenize='unicode61')")
+            self.conn.commit()
+            self._fts_ok = True
+        except sqlite3.OperationalError as e:
+            self.conn.rollback()
+            self._fts_ok = False
+            self._warn_once(f"FTS5 不可用({e}),关键词召回走 LIKE 降级")
+            return
+        if not self._fts_built():
+            if self.conn.execute("SELECT 1 FROM facts LIMIT 1").fetchone() is None:
+                self._set_fts_built()
+
+    @staticmethod
+    def _warn_once(msg: str) -> None:
+        if msg not in _WARNED:
+            _WARNED.add(msg)
+            print(f"[facts] {msg}", file=sys.stderr)
+
+    def _fts_built(self) -> bool:
+        row = self.conn.execute("SELECT value FROM fts_meta WHERE key='built'").fetchone()
+        return bool(row and row[0] == "1")
+
+    def _set_fts_built(self) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO fts_meta(key, value) VALUES('built','1')")
+        self.conn.commit()
+
+    @staticmethod
+    def _fts_grams(claim, obj, subj) -> str:
+        """索引文本:claim+object+subject 的 content_grams(与检索/冲突消解同一基元)空格连接。"""
+        return " ".join(sorted(content_grams(f"{claim or ''} {obj or ''} {subj or ''}")))
+
+    def _fts_write(self, fact_id: str, claim, obj, subj) -> None:
+        """(在调用方事务内)写/改写一条索引。同 fact_id 已有映射 → 先删旧 FTS 行再写。"""
+        if not self._fts_ok:
+            return
+        row = self.conn.execute("SELECT id FROM fts_map WHERE fact_id=?", (fact_id,)).fetchone()
+        if row:
+            rid = row[0]
+            self.conn.execute("DELETE FROM facts_fts WHERE rowid=?", (rid,))
+        else:
+            rid = self.conn.execute("INSERT INTO fts_map(fact_id) VALUES(?)", (fact_id,)).lastrowid
+        self.conn.execute("INSERT INTO facts_fts(rowid, grams) VALUES(?,?)",
+                          (rid, self._fts_grams(claim, obj, subj)))
+
+    @staticmethod
+    def _fts_terms(text: str) -> list:
+        """查询项:content_grams(去停用 gram)∪ 用户明确输入的整词(仅当其本身就是索引 token:
+        2 字中文或英数词;"股份"作为切出的 gram 被停用,但用户整词查"股份"仍可查)。"""
+        words = [t for t in re.split(r"[\s,，、;；。]+", text or "") if 2 <= len(t) <= 40]
+        whole = [w.lower() for w in words
+                 if (len(w) == 2 and not w.isascii()) or re.fullmatch(r"[A-Za-z0-9]{2,}", w)]
+        grams = [g for g in content_grams(text or "") if len(g) >= 2 and g not in _STOP_GRAMS]
+        return list(dict.fromkeys(whole + grams))[:40]
+
+    def _search_fts(self, text: str, canonical_id: Optional[str], limit: int) -> list[dict]:
+        terms = self._fts_terms(text)
+        if not terms:
+            return self._search_like(text, canonical_id, False, limit)
+        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+        fetch = limit * 2 if canonical_id else int(limit * 1.3) + 20   # 回表过滤 status 会掉一些
+        fids = [r[0] for r in self.conn.execute(
+            "SELECT m.fact_id FROM facts_fts JOIN fts_map m ON m.id = facts_fts.rowid "
+            "WHERE facts_fts MATCH ? ORDER BY bm25(facts_fts) LIMIT ?", (match, fetch))]
+        by_id: dict = {}
+        for i in range(0, len(fids), 400):
+            chunk = fids[i:i + 400]
+            # `+status` / `+canonical_id`:一元加号禁止规划器对该列用索引。否则它会选
+            # idx_facts_status 扫全部 110 万 active 行再过滤 IN 列表(实测 6~9s),而非
+            # 按 fact_id 主键点查 400 条(0.01s)。
+            sql = (f"SELECT * FROM facts WHERE fact_id IN ({','.join('?' * len(chunk))}) "
+                   "AND +status IN ('active','disputed')")
+            args: list = list(chunk)
+            if canonical_id:
+                sql += " AND +canonical_id=?"
+                args.append(canonical_id)
+            for r in self.conn.execute(sql, args):
+                by_id[r["fact_id"]] = dict(r)
+        out = []
+        for fid in fids:                       # 保 bm25 序;索引漂移(fact 已删/改状态)只丢名额不出错
+            f = by_id.get(fid)
+            if f is not None:
+                out.append(f)
+                if len(out) >= limit:
+                    break
+        return out
+
+    def fts_build(self, batch: int = 20000) -> dict:
+        """FTS5 索引对账:补缺(active/disputed 里未索引的)+ 清孤儿(索引里已不活跃、或被绕过
+        FactsStore 的 raw-SQL 治理脚本删/改 fact_id 的),完成后标记 built。可反复跑;
+        首建 1.1M 行实测约 1 分钟。与 semantic.build 同一自愈模式,挂日常 --tail-only。"""
+        if not self._fts_ok:
+            raise RuntimeError("FTS5 不可用(SQLite 过旧或无 fts5 扩展)")
+        active = {r[0] for r in self.conn.execute(
+            "SELECT fact_id FROM facts WHERE status IN ('active','disputed')")}
+        mapped = {r[0]: r[1] for r in self.conn.execute("SELECT fact_id, id FROM fts_map")}
+        missing = [f for f in active if f not in mapped]
+        orphans = [(mapped[f],) for f in mapped if f not in active]
+        added = 0
+        for i in range(0, len(missing), batch):
+            chunk = missing[i:i + batch]
+            rows = []
+            for j in range(0, len(chunk), 500):
+                sub = chunk[j:j + 500]
+                rows += self.conn.execute(
+                    "SELECT fact_id, claim, object, subject FROM facts "
+                    f"WHERE fact_id IN ({','.join('?' * len(sub))})", sub).fetchall()
+            with self.conn:                    # 每批一个事务,写锁有界
+                for r in rows:
+                    self._fts_write(r["fact_id"], r["claim"], r["object"], r["subject"])
+            added += len(rows)
+        if orphans:
+            with self.conn:
+                self.conn.executemany("DELETE FROM facts_fts WHERE rowid=?", orphans)
+                self.conn.executemany("DELETE FROM fts_map WHERE id=?", orphans)
+        if added or orphans:
+            with self.conn:
+                self.conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('optimize')")
+        self._set_fts_built()
+        return {"added": added, "removed": len(orphans), "indexed": len(active)}
+
+    def fts_status(self) -> dict:
+        """cli status 用:可用/已启用/已索引条数/应索引条数。"""
+        indexed = (int(self.conn.execute("SELECT COUNT(*) FROM fts_map").fetchone()[0])
+                   if self._fts_ok else 0)
+        return {"ok": self._fts_ok, "built": self._fts_ok and self._fts_built(),
+                "indexed": indexed, "active": self.count_active()}
 
     # ── 写入(含去重合并)─────────────────────────────────────────────────
     def upsert(self, fact: Fact, _depth: int = 0) -> str:
@@ -98,6 +256,13 @@ class FactsStore:
                         :invalid_at,:supersedes,:relation_id,:category,:extra)""",
                     row,
                 )
+                # 同事务写 FTS 索引(P0-B);索引写失败只出声,绝不让事实本身落库失败
+                # (漂移由 fts_build 日常对账兜底)。
+                try:
+                    self._fts_write(fact.fact_id, row.get("claim"), row.get("object"),
+                                    row.get("subject"))
+                except sqlite3.OperationalError as e:
+                    self._warn_once(f"FTS 索引写入失败,待 fts build 对账({e})")
                 self.conn.commit()
                 return fact.fact_id
             except sqlite3.IntegrityError:
@@ -251,13 +416,27 @@ class FactsStore:
 
     def search(self, text: str, canonical_id: Optional[str] = None,
                include_invalidated: bool = False, limit: int = 400) -> list[dict]:
-        """文本召回(SQL LIKE 预筛，不受全表扫描上限)。
+        """文本召回:FTS5 bigram + BM25(2026-08-25),截断发生在相关性排序**之后**。
 
-        供 ask 在候选池上做 gram+成色+时效加权排序。中文无分词，按空白/标点切词后
-        任一 token 命中 claim/object/subject 即入候选。
-        根治旧 _keyword_facts 只扫前 2000 条导致大库召回坍缩的问题
-        (如精智达 167 条社媒事实因成色低排在 17 万条之后，进不了前 2000)。
+        供 ask 在候选池上做 gram+成色+时效加权排序。降级链:FTS 不可用 / 索引未建
+        (`tkb fts build`)/ 查询异常 / include_invalidated=True(只 LIKE 支持)→ 旧 LIKE 预筛
+        (出声)。返回顺序:FTS 路径按 bm25 相关性;LIKE 路径按 rowid 降序(新入库优先)。
         """
+        if self._fts_ok and not include_invalidated:
+            if self._fts_built():
+                try:
+                    return self._search_fts(text, canonical_id, limit)
+                except sqlite3.OperationalError as e:
+                    self._warn_once(f"FTS 查询异常,降级 LIKE({e})")
+            else:
+                self._warn_once("FTS 索引未建(跑 ./tkb fts build),关键词召回走 LIKE 降级")
+        return self._search_like(text, canonical_id, include_invalidated, limit)
+
+    def _search_like(self, text: str, canonical_id: Optional[str] = None,
+                     include_invalidated: bool = False, limit: int = 400) -> list[dict]:
+        """旧版 SQL LIKE 预筛(降级路径保留)。中文无分词,按空白/标点切词后任一 token 命中
+        claim/object/subject 即入候选;ORDER BY rowid DESC 截断——高频 token 会灌满名额,
+        这正是 FTS 要治的病,仅作 FTS 不可用时的兜底。"""
         import re as _re
         from .models import content_grams as _cg
         # token = 分隔符切的实词(保精确短语如 688627) ∪ content_grams(治无空格中文，

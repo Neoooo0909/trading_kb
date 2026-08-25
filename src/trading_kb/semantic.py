@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -205,6 +206,16 @@ class SemanticIndex:
                                        [(x,) for x in orphans])
                 self._conn.commit()
             self._mat = self._ids = self._mat_ver = None    # 失效内存缓存
+            if n or orphans:
+                # 库变了 → 顺手把矩阵磁盘缓存(P1-D)也刷新,别留给第一个 ask 用 210s 重建。
+                # 先 TRUNCATE checkpoint:缓存指纹取主文件 mtime/size,若留到连接关闭时再
+                # checkpoint,主文件随后又变 → 刚写的缓存立刻失效。
+                try:
+                    self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    self._load_matrix()
+                except Exception as e:
+                    print(f"[semantic] build 后刷新矩阵缓存失败(下次 ask 会重建):"
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
         return n
 
     # ── 检索 ────────────────────────────────────────────────────────────
@@ -219,11 +230,74 @@ class SemanticIndex:
                 v.append(None)
         return tuple(v)
 
+    # ── 矩阵磁盘缓存(P1-D,2026-08-25)────────────────────────────────────────
+    # 每个进程从 sqlite BLOB 逐行读 1.1M×512 再 vstack 实测 210s;CLI 每次 ask 是新进程,
+    # 语义成为常规路径(R0 修复)后等于每问 3 分钟。改为首次读完落 .npy(+ids.json),后续
+    # 进程 np.load(mmap_mode="r") 秒开(实测 6.9s 冷读盘,页缓存热后 <1s)。派生物,可随时
+    # 删除重建;不进备份(prune_backups 只认 *.db.bak.* 模式,_db_backup 只走 sqlite backup API)。
+    def _cache_paths(self) -> tuple:
+        base = str(self.vec_db)
+        return Path(base + ".mat.npy"), Path(base + ".ids.json")
+
+    def _cache_key(self) -> list:
+        """跨进程缓存指纹:向量库主文件 (mtime_ns, size) + 向量条数。
+
+        故意不含 -wal:每个进程打开 WAL 库都会新建/删除 -wal,其 mtime 每次都变,拿它做键
+        缓存永远失效。build 结束 checkpoint 会改主文件 mtime/size → 自然失效。"""
+        try:
+            st = self.vec_db.stat()
+            main = [st.st_mtime_ns, st.st_size]
+        except OSError:
+            main = [None, None]
+        n = int(self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
+        return main + [n]
+
+    def _load_matrix_cache(self) -> bool:
+        """命中磁盘缓存则 memmap 装入并返回 True;指纹/形状不符或任何异常 → False(走 BLOB)。"""
+        mat_p, ids_p = self._cache_paths()
+        if not (mat_p.exists() and ids_p.exists()):
+            return False
+        try:
+            meta = json.loads(ids_p.read_text(encoding="utf-8"))
+            if meta.get("key") != self._cache_key():
+                return False
+            ids = meta.get("ids") or []
+            m = np.load(str(mat_p), mmap_mode="r")
+            if m.ndim != 2 or m.shape[0] != len(ids) or m.shape[1] != self.backend.dim:
+                return False
+            self._mat, self._ids = m, ids
+            return True
+        except Exception as e:
+            print(f"[semantic] 矩阵缓存读取失败,回退 BLOB 加载({type(e).__name__}: {e})",
+                  file=sys.stderr)
+            return False
+
+    def _save_matrix_cache(self) -> None:
+        """落盘:先写 .tmp 再 os.replace(两个进程同时保存也不会互相撕裂);ids 最后写,
+        读端先校指纹再校形状,半新半旧组合会被形状校验拒掉。失败只出声不阻断检索。"""
+        mat_p, ids_p = self._cache_paths()
+        try:
+            tmp_m = Path(str(mat_p) + ".tmp")
+            with open(tmp_m, "wb") as fh:             # 用文件句柄:np.save 对非 .npy 名会自动加后缀
+                np.save(fh, np.ascontiguousarray(self._mat, dtype="float32"))
+            os.replace(tmp_m, mat_p)
+            tmp_i = Path(str(ids_p) + ".tmp")
+            tmp_i.write_text(json.dumps({"key": self._cache_key(), "ids": self._ids},
+                                        ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_i, ids_p)
+        except Exception as e:
+            print(f"[semantic] 矩阵缓存写入失败(不影响本次检索)({type(e).__name__}: {e})",
+                  file=sys.stderr)
+
     def _load_matrix(self) -> None:
         """加载全部向量到内存并归一化(余弦=点积)。库指纹变了自动重载——
-        长驻 web 进程期间外部跑 `tkb semantic build` 不再静默用旧矩阵。"""
+        长驻 web 进程期间外部跑 `tkb semantic build` 不再静默用旧矩阵。
+        优先磁盘缓存(P1-D);未命中才从 BLOB 逐行读,读完顺手落盘。"""
         ver = self._db_version()
         if self._mat is not None and ver == self._mat_ver:
+            return
+        if self._load_matrix_cache():
+            self._mat_ver = ver
             return
         ids, vecs = [], []
         for fid, blob in self._conn.execute("SELECT fact_id, vec FROM vectors"):
@@ -238,6 +312,7 @@ class SemanticIndex:
         self._mat = m / norms
         self._ids = ids
         self._mat_ver = ver
+        self._save_matrix_cache()
 
     def search(self, query: str, top_k: int = 120) -> list[str]:
         """语义召回 top-k fact_ids(召回字面不匹配但语义相关的事实)。

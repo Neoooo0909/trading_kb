@@ -47,6 +47,17 @@ USE_WEB = os.environ.get("TKB_USE_WEB", "0") == "1"
 USE_REVALUE = os.environ.get("TKB_REVALUE", "0") == "1"
 
 
+# ── 检索(2026-08-25 召回缺口修复,见 docs/RECALL_FIX_PLAN_20260825.md)──────────
+# 证券实体走"精准快路径"(只用自有事实、不跑语义、启用跨证券别名过滤)所需的最少自有
+# active 事实数。注册表里 10.9 万个 company: 实体中 7.5 万零事实、2 万单事实(多为
+# "AIDC用电需求""HBM先进封装"这类被登记成公司的短语),按前缀一律当证券会让查询被劫持
+# 进快路径、其余候选全丢。真上市码 / 带 stock_code 的实体不受此阈值约束。
+FAST_PATH_MIN_FACTS = int(os.environ.get("TKB_FAST_PATH_MIN_FACTS", "10"))
+# LLM 合成层看到的材料包上限(字符)。旧值 8000 只够证据链前 ~70 条,候选池 500+ 时
+# 排在后面的相关事实对 LLM 等于不存在。
+SYNTH_MATERIAL_CHARS = int(os.environ.get("TKB_SYNTH_MATERIAL_CHARS", "24000"))
+
+
 def ensure_data_dir() -> None:
     """确保数据目录存在。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)

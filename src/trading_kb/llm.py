@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from . import config
 from .models import Finding
 
 _RL_SCRIPTS = Path.home() / "report_lab" / "scripts"
@@ -135,5 +136,8 @@ _SYNTH_PROMPT = """你是A股投研助手。基于下面的"检索材料包"(六
 
 def synthesize_answer(query: str, material: str) -> Optional[str]:
     """C：用 Sonnet(tier=answer) 把六段式材料包合成自然语言回答。失败返回 None。"""
-    return complete(_SYNTH_PROMPT.format(query=query, material=material[:8000]),
+    # 材料窗口(2026-08-25):8000 字只够证据链前 ~70 条,候选池 500+ 时后面的相关事实对 LLM
+    # 等于不存在;上限收到 config.SYNTH_MATERIAL_CHARS(默认 24000,环境变量可调)。
+    return complete(_SYNTH_PROMPT.format(query=query,
+                                         material=material[:config.SYNTH_MATERIAL_CHARS]),
                     max_tokens=2048, tier="answer")

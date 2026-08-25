@@ -103,12 +103,21 @@ structure.db  relations    typed 产业链边 + 多篇投票
 entities.db   entities+aliases  实体归一(canonical_id + 别名 + merged_into)
 sentiment.db  sentiment(+raw)   舆情轻 lane，D 级隔离
 vectors_bge.db vectors     语义向量(fact_id → BLOB)，与 facts 弱关联(无外键，靠 build 清孤儿)
+vectors_bge.db.mat.npy / .ids.json   语义矩阵磁盘缓存(派生物，memmap 秒开；指纹=主文件 mtime/size+条数，
+                           失配自动从 BLOB 重建；可随时删除，不进备份)
+facts.db      facts_fts + fts_map + fts_meta   FTS5 关键词索引(2-gram + bm25)：upsert 同事务写，
+                           `tkb fts build` 日常对账(补缺+清孤儿)；fts_meta.built 未置位时 search 走 LIKE 降级
 hypotheses/H*.md           假设账本(纯文件)
 ```
 
 已知的结构性约束（当前接受、中期偿还）：
 - fact_id 是语义派生哈希 → predicate/主体一变 id 就变，规则演进需 requalify 手术；
-- facts_store.search 是 LIKE 全表扫（18.7 万行量级尚可）；
+- facts_store.search 已改 FTS5(2026-08-25，docs/RECALL_FIX_PLAN_20260825.md)；LIKE 只作降级路径。
+  绕过 FactsStore 的 raw-SQL 治理脚本会让索引漂移，靠日常 `tkb fts build` 对账兜底；
+- ask 快路径按实体覆盖度 + 短语型判定(FAST_PATH_MIN_FACTS / is_pseudo_company)；零/寡事实的真公司
+  company: 仍会被 _locate_entity 锚到并切发现模式(出声)，这是设计行为不是 bug；
+- EntityRegistry.merge 不回写 facts/relations，事实侧靠治理脚本 _reattribute、关系侧靠
+  scripts/fix_relation_merged_refs.py 事后对账(2026-08-25 起)；
 - ask._locate_entity 全量别名进 Python 匹配（17 万级，问答固定开销）。
 
 ---
@@ -134,10 +143,15 @@ launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
 
 1. **主键与语义解耦**：facts 换自增代理主键，dedup_key 保留 UNIQUE 独立演进；
    引入 `PRAGMA user_version` + migrations/ 目录，把 requalify 类脚本收编为编号迁移。
-2. **FTS5 替代 LIKE 全表扫**；别名定位改"query 提取候选子串→索引查询"。
+2. ~~FTS5 替代 LIKE 全表扫~~(2026-08-25 已做)；别名定位改"query 提取候选子串→索引查询"。
 3. structure_store 与 facts_store 的乐观重试逻辑抽共享基类（当前同构复制已开始漂移）。
 4. 反证闭环（contradict）与 D 级升级闸（sentiment promote）目前是纸面功能，
    待接线时先补调用方设计。
+5. ~~注册表卫生~~（2026-08-25 已做）：① ingest 闸门 `entity_quality.is_pseudo_company`（ingest_card 里
+   company→concept 降级，ask._fast_path 同规则拒快路径）；② 存量 `scripts/retype_pseudo_companies.py`
+   改型 3,116 个 company:短语 → concept:（重挂 5,791 事实 / 6,029 关系）。**没有**整批清 74,606 个零事实
+   company——实测它们绝大多数是真公司（数库科技/丸红/Cologix…，事实挂在别处），且 3,056 个被关系引用。
+   另修 `scripts/fix_relation_merged_refs.py`：历史 merge 从不回写 relations，8,413 条边悬空指向旧 cid。
 5. web 内嵌 340 行 HTML/JS 拆独立资源文件；web 端 ask 补 auto_verify 与 CLI 对齐。
 
 ---

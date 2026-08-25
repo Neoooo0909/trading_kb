@@ -14,6 +14,7 @@ from typing import Optional
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .structure_store import StructureStore
+from . import config
 from .models import LEVEL_RANK as _LEVEL_RANK, _normalize, content_grams as _content_grams
 
 
@@ -217,14 +218,24 @@ class AskEngine:
                 cid = fz
                 result.warnings.append(f"查询疑似字形笔误,已纠错到最接近的已上市标的 {cid}")
         result.canonical_id = cid or ""
-        # 本实体的全部别名(仅证券查询):用于过滤跨证券噪音(见 _rank_facts)
+        # 快路径判定按**覆盖度**而非 cid 前缀(R0,2026-08-25):证券实体只有自有事实足够多
+        # (或真上市码/带 stock_code)才走"只用自有事实、不跑语义、启用跨证券别名过滤"的精准
+        # 快路径;零/寡事实的 company:(注册表里 9.4 万个,多为"HBM先进封装""数据中心自备电源"
+        # 这类被登记成公司的短语)一律切发现模式——否则查询被劫持进快路径:语义不跑 + 别名
+        # 过滤把其余候选全丢,只剩那 1 条,ask 回答"库里没有"(球硅/燃气轮机两案例的主因)。
+        fast, n_own = self._fast_path(cid)
+        # 本实体的全部别名(仅快路径证券查询):用于过滤跨证券噪音(见 _rank_facts)
         ent_aliases = set()
-        if cid and _is_security(cid):
+        if cid and fast:
             ent_aliases = self.registry.aliases_of(cid)
-        # 语义召回触发:无实体 **或** 定位到的是非证券概念(发现型/topic 查询)。治"存储测试设备龙头"
+        elif cid and _is_security(cid):
+            result.warnings.append(
+                f"锚到低覆盖/短语型实体 {cid}(自有事实 {n_own} 条 < {config.FAST_PATH_MIN_FACTS}"
+                " 或名字是主题短语),已切发现模式:关键词+语义加权,不做跨证券过滤")
+        # 语义召回触发:无实体 / 非证券概念(发现型 topic 查询)/ 低覆盖证券实体。治"存储测试设备龙头"
         # 锚到 concept 后跳过语义、池里只剩字面"存储"的募资公告、高语义的龙头股(精智达)进不来。
-        # 个股/公司命中走精准快路径(其自有事实已准),不跑较重的语义召回。
-        want_sem = (cid is None or not _is_security(cid)) if use_semantic is None else bool(use_semantic)
+        # 高覆盖个股/公司走精准快路径(其自有事实已准),不跑较重的语义召回。
+        want_sem = (not fast) if use_semantic is None else bool(use_semantic)
 
         # 候选池:实体命中 ∪ LIKE 召回 ∪(可选)语义召回
         pool: list[dict] = []
@@ -262,8 +273,7 @@ class AskEngine:
         # 拉实时量价/估值构建环境快照,失败静默降级(不阻断问答)。
         want_rev = revalue
         if want_rev is None:
-            from . import config
-            want_rev = getattr(config, "USE_REVALUE", False)
+            want_rev = getattr(config, "USE_REVALUE", False)   # config 已模块级导入
         if want_rev and cid and _is_security(cid):
             try:
                 from .revalue import build_env
@@ -273,6 +283,35 @@ class AskEngine:
             except Exception as e:
                 result.warnings.append(f"环境重估异常已跳过:{type(e).__name__}")
         return result
+
+    def _fast_path(self, cid) -> tuple:
+        """证券实体是否走"精准快路径"(只用自有事实、不跑语义、启用跨证券别名过滤)。
+
+        R0 根因(2026-08-25):注册表 10.9 万个 company: 实体里 7.5 万零事实、2 万单事实(多为
+        "AIDC用电需求""HBM先进封装"这类被登记成公司的短语)。旧逻辑按前缀一律当证券走快路径 →
+        语义召回不跑 + 别名过滤把其余候选全丢 → 只剩那 1 条,ask 回答"库里没有"。
+        新判据按**覆盖度**:真上市码 / 带 stock_code / 自有 active 事实 >= FAST_PATH_MIN_FACTS
+        才算"这个实体自己的事实已足够精准";否则切发现模式(语义+关键词加权,不过滤)。
+        返回 (是否快路径, 自有事实数;-1 表示无需计数)。非证券 cid 恒 (False, -1)。
+        """
+        if not cid or not _is_security(cid):
+            return False, -1
+        if re.match(r"^(SH|SZ|BJ)\d", cid):
+            return True, -1
+        try:
+            ent = self.registry.get(cid)
+        except Exception:
+            ent = None
+        if ent and ent.get("stock_code"):
+            return True, -1
+        # 短语型伪公司("云厂商"76 条、"北美数据中心"102 条)即便自有事实多也不走快路径——
+        # 它们是主题不是主体,快路径的别名过滤会把真正相关的个股事实全丢。与 ingest 闸门同一规则。
+        from .entity_quality import is_pseudo_company
+        if ent and is_pseudo_company(ent.get("display_name")):
+            return False, 0
+        n_min = config.FAST_PATH_MIN_FACTS
+        n = len(self.facts.query(canonical_id=cid, include_invalidated=False, limit=n_min))
+        return n >= n_min, n
 
     def _rank_facts(self, query: str, facts: list[dict], cid,
                     use_semantic: bool = False, ent_aliases: set | None = None) -> list[dict]:

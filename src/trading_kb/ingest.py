@@ -11,7 +11,7 @@ from typing import Optional
 from . import config
 from .classify import classify_finding, predicate_for, relation_for
 from .critique import CritiqueEngine
-from .entity_quality import attribute_subject, is_garbage_entity, is_ib_firm
+from .entity_quality import attribute_subject, is_garbage_entity, is_ib_firm, is_pseudo_company
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .grade import grade_fact
@@ -200,6 +200,10 @@ class ResearchIngestor:
                 continue                       # 实体名缺失/非字符串(LLM 偶发畸形) → 跳这一个,不毁整卡
             kind = e.get("kind") or "concept"
             etype = _kind_to_type(kind)        # _kind_to_type 已对非字符串 kind 容错
+            # 闸门(P2-F①,2026-08-25):LLM 把"AI需求/北美数据中心/HBM先进封装"这类主题短语标成
+            # company → 降为 concept 登记。否则 company: 前缀被 ask 当证券,劫持查询进快路径。
+            if etype == "company" and is_pseudo_company(name):
+                etype = "concept"
             self.registry.resolve(name, type_=etype, stock_code=e.get("code"))
             card_entity_names.append(name)
             # A4:只有"股票"类才进 code_map(基金/指数/产品不锚成股票)

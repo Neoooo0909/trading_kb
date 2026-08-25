@@ -208,6 +208,51 @@ def card_subject_entities(card_entities_iter, broker: str = "") -> list:
     return out
 
 
+# ── 短语型"伪公司"(2026-08-25,docs/RECALL_FIX_PLAN_20260825.md P2-F)──────────────
+# LLM 抽实体时常把"AI需求""北美数据中心""HBM先进封装""数据中心自备电源"这类**主题短语**标成
+# company。按前缀当证券会让 ask 走精准快路径劫持查询(语义不跑+别名过滤丢光)。实测注册表
+# company 实体 10.9 万个,每天新增约 720 个、96% 零/寡事实。本规则**精度优先**:只认泛化后缀
+# (需求/市场/板块/产业链/厂商/客户…)、地域前缀+泛词、动词短语;凡名字含 有限/公司/集团/股份/
+# 合伙/Inc/Corp 等公司标记一律放行。"企业/投资/银行"裸后缀故意不收(万业企业/粤海投资/美国银行
+# 是真公司),"机器人/汽车/半导体/存储"等行业词后缀不收(地平线机器人/长鑫存储是真公司)。
+_PSEUDO_SUFFIX = re.compile(
+    r"(需求|市场|板块|概念|产业链|景气|景气度|产能|趋势|环节|赛道|场景|供应链|订单|政策|指数"
+    r"|渗透率|价格|出货量|销量|市占率|份额|周期|方向|主线|逻辑|机会|标的|龙头|厂商|供应商|客户"
+    r"|大客户|玩家|巨头|行业|领域|应用|技术迭代|升级|扩产|增长|放量|复苏|涨价|降价|缺货|国产化"
+    r"|国产替代|替代|出海|业务|产品线|方案|资本开支|capex|自备电源|自备电厂|先进封装|封装技术"
+    r"|封装工艺|需求端|供给端|竞争格局|扩张|建设|采购|招标|订单量|出口|进口|关税|制裁|局势|风险"
+    r"|地缘|装机量|装机|渗透"
+    r"|(?:头部|主流|龙头|大型|中小|民营|国有|科技|电池|OEM|本土|海外|国内|中国|美国|日本|韩国"
+    r"|欧洲|传统|新兴|上市|A股|港股|黑电|白电|光伏|储能|车企)企业"
+    r"|(?:AI|全球|海外|资本|矿山|能源|基建|固定资产|设备|算力|数据中心)投资)$", re.I)
+_PSEUDO_VERB = re.compile(
+    r"(推动|带动|拉动|受益|导致|要求|加速|放缓|下滑|提升|增加|减少|上调|下调|超预期|不及预期"
+    r"|成趋势|爆发|旺盛|紧缺|翻倍|驱动)")
+_PSEUDO_REGION = re.compile(
+    r"^(全球|海外|国内|国外|北美|美国|欧洲|欧盟|中国|日本|韩国|东南亚|亚太|中东|拉美|印度|台湾"
+    r"|A股|港股|美股)(数据中心|云厂商|客户|大客户|电网|算力|市场|需求|产能|AI|科技股|半导体"
+    r"|新能源|光伏|储能|机器人|汽车|地产|AIDC)")
+_PSEUDO_GENERIC = _GENERIC | {"云厂商", "厂商", "客户端", "数据中心", "算力"}
+_COMPANY_MARK = re.compile(r"有限|公司|集团|股份|合伙|Inc\b|Corp|Ltd|Co\.|LLC|AG$|SA$|N\.V\.|plc", re.I)
+
+
+def is_pseudo_company(name) -> bool:
+    """名字是否为被误标成 company 的**主题短语**(高精度,保守)。
+
+    用于:① ingest 登记 company 前降为 concept(止血,伪实体每天在增产);② ask._fast_path 拒绝
+    快路径(存量未清前也不劫持);③ scripts/retype_pseudo_companies.py 存量改型。
+    含公司标记(有限/公司/集团/股份/合伙/Inc…)的名字永远 False,精度优先。
+    """
+    if not isinstance(name, str):
+        return False
+    n = name.strip()
+    if not n or _COMPANY_MARK.search(n):
+        return False
+    if n in _PSEUDO_GENERIC:
+        return True
+    return bool(_PSEUDO_SUFFIX.search(n) or _PSEUDO_REGION.match(n) or _PSEUDO_VERB.search(n))
+
+
 def is_garbage_entity(name, type_: str = "concept") -> bool:
     """判断 (name, type_) 是否为垃圾实体(高精度,保守)。stock/fund/index 一律 False。"""
     if not isinstance(name, str):
