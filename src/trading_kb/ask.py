@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .entity_registry import EntityRegistry
-from .facts_store import FactsStore
+from .facts_store import FactsStore, extra_of
 from .structure_store import StructureStore
 from . import config
 from .models import LEVEL_RANK as _LEVEL_RANK, _normalize, content_grams as _content_grams
@@ -35,6 +35,10 @@ class AskResult:
         if not self.facts and not self.neighbors:
             lines.append("**证据不足**:知识库中未找到与该查询匹配的事实或结构关系。")
             lines.append("建议:先入相关研报,或换更具体的实体/主线词。")
+            # 零结果正是最需要出声的场景(锚错实体/FTS 降级/字形纠错),此前早退把 warnings 吞掉(审核 F10)
+            if self.warnings:
+                lines.append("\n## ⚠ 检索告警")
+                lines += [f"- {w}" for w in self.warnings]
             return "\n".join(lines)
 
         # 结论(N1:排除 disputed,争议项只进"分歧/反证"段)
@@ -93,7 +97,9 @@ class AskResult:
 
         # 后续验证
         lines.append("\n## 后续验证")
-        unver = [f for f in active if f["unverifiable"]]
+        # view 恒 unverifiable 且成色 C/D,已在情绪面段列过;这里只列可被公告/数据印证的硬事实,
+        # 否则 5 个名额几乎全被 view 占掉(审核 C P2)。
+        unver = [f for f in active if f["unverifiable"] and f.get("category") != "view"]
         if unver:
             lines.append(f"以下 {len(unver)} 条为待验证(unverifiable),需盯公告/数据印证:")
             for f in unver[:5]:
@@ -136,13 +142,7 @@ class AskResult:
         截断旧 bug 在跑——双实现漂移的现行证据,故收敛到此。)
         invalidated[:5]/followup[:5] 与文本版同上限,属两端一致的展示口径。
         """
-        import json as _json
-
-        def _extra(f):
-            try:
-                return _json.loads(f.get("extra") or "{}")
-            except Exception:
-                return {}
+        _extra = _fact_extra          # 唯一 extra 解析实现(facts_store.extra_of),不再各写一套
 
         active = [f for f in self.facts if f["status"] == "active"]
         out: dict = {
@@ -158,7 +158,8 @@ class AskResult:
                 "invalidated": [{"claim": f["claim"], "status": f["status"]}
                                 for f in self.invalidated_facts[:5]],
             },
-            "followup": [f["claim"][:80] for f in active if f["unverifiable"]][:5],
+            "followup": [f["claim"][:80] for f in active
+                         if f["unverifiable"] and f.get("category") != "view"][:5],
             "sources": sorted({s for f in active for s in _sources(f)}),
             "neighbors": [{"rel": n.get("rel_type", ""), "name": n.get("dst", "")}
                           for n in self.neighbors],
@@ -343,7 +344,7 @@ class AskEngine:
             # 仅证券查询触发(ent_aliases 仅证券非空);非证券/发现型查询走语义,不做此过滤。
             # P1(2026-08-26):extra.entities 是该事实点名的全部实体(主体只取首实体,其余此前全丢);
             # 它参与字面覆盖率与别名过滤,让"挂在浩通科技名下、entities 含晓程科技"的事实查晓程时进得了池。
-            ents_text = " ".join(_fact_extra(f).get("entities") or [])
+            ents_text = _ents_text(f)
             if ent_aliases and not ent_hit:
                 ftext = _normalize(f"{f.get('claim','')}{f.get('object','')}"
                                    f"{f.get('subject','')}{ents_text}")
@@ -537,12 +538,14 @@ def _low_grade_views(active: list[dict]) -> list[dict]:
 
 
 def _fact_extra(f: dict) -> dict:
-    """事实行的 extra JSON → dict(畸形/缺失返回 {});模块级,供 _rank_facts 等用。"""
-    import json as _json
-    try:
-        return _json.loads(f.get("extra") or "{}") or {}
-    except (TypeError, ValueError):
-        return {}
+    """事实行的 extra JSON → dict;唯一实现在 facts_store.extra_of(合法 JSON 但非对象如 `[1,2]`
+    也返回 {}——此前这里 `.get` 直接崩,一行坏数据让整次 ask 崩、web 500,审核 F11)。"""
+    return extra_of(f)
+
+
+def _ents_text(f: dict) -> str:
+    """extra.entities → 空格拼接文本;非 str 元素(null 等)过滤,不让 join 抛 TypeError。"""
+    return " ".join(e for e in (_fact_extra(f).get("entities") or []) if isinstance(e, str))
 
 
 def _top_conclusion(active: list) -> dict:

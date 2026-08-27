@@ -20,10 +20,23 @@ def _f(subj, claim, cid, level="C", **kw):
                 claim=claim, evidence_level=level, sources=kw.pop("sources", ["s"]), **kw)
 
 
+def _legacy_company(reg, name: str) -> str:
+    """模拟闸门下沉(2026-08-27)之前登记进注册表的存量伪公司行:register() 现在会把主题短语降为
+    concept,所以直接 raw INSERT 一行 type=company(生产库里 08-25 前的存量正是这种)。"""
+    from trading_kb.models import _normalize
+    cid = f"company:{_normalize(name)}"
+    reg.conn.execute("INSERT OR IGNORE INTO entities(canonical_id,display_name,type,source) VALUES(?,?,?,?)",
+                     (cid, name, "company", "legacy"))
+    reg.conn.execute("INSERT OR IGNORE INTO aliases(alias_norm,canonical_id) VALUES(?,?)",
+                     (_normalize(name), cid))
+    reg.conn.commit()
+    return cid
+
+
 # ── R0:路由按覆盖度 ────────────────────────────────────────────────────────
 def test_low_coverage_company_switches_to_discovery(tmp_registry, tmp_facts, tmp_structure):
     """伪公司实体(1 条自有事实)命中查询 → 不走快路径:不做别名过滤、告警出声,球硅事实进结论。"""
-    junk = tmp_registry.register("HBM先进封装", type_="company")          # 无 stock_code
+    junk = _legacy_company(tmp_registry, "HBM先进封装")                  # 存量伪公司行(无 stock_code)
     tmp_facts.upsert(_f("HBM先进封装", "HBM先进封装 DRIVES 半导体封测:HBM向2.5D/3D封装演进", junk))
     for i, cl in enumerate(["HBM先进封装是高端化学法球硅核心应用场景,拉动球硅需求翻倍",
                             "CoWoS封装光罩尺寸扩大,需更多球硅用于底部填充",
@@ -181,7 +194,7 @@ def test_ingest_gate_registers_pseudo_company_as_concept(tmp_registry, tmp_facts
 def test_fast_path_rejects_rich_pseudo_company(tmp_registry, tmp_facts, tmp_structure):
     """"云厂商"这类短语即使自有事实 ≥ 阈值也不走快路径(与闸门同规则)。"""
     from trading_kb import config
-    cid = tmp_registry.register("云厂商", type_="company")           # 模拟存量伪实体
+    cid = _legacy_company(tmp_registry, "云厂商")                    # 模拟存量伪实体(raw 行)
     for i in range(config.FAST_PATH_MIN_FACTS + 2):
         tmp_facts.upsert(_f("云厂商", f"云厂商资本开支第{i}期上修", cid, sources=[f"y{i}"]))
     eng = AskEngine(tmp_registry, tmp_facts, tmp_structure)

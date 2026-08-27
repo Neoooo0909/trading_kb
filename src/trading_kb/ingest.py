@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from . import config
-from .classify import classify_finding, predicate_for, relation_for
+from .classify import classify_with_reason, has_real_entity, predicate_for, relation_for
 from .critique import CritiqueEngine
 from .entity_quality import attribute_subject, is_garbage_entity, is_ib_firm, is_pseudo_company
-from .entity_registry import EntityRegistry
+from .entity_registry import EntityRegistry, UNKNOWN_CID
 from .facts_store import FactsStore
 from .grade import grade_fact
-from .models import Fact, Finding, Relation, _normalize, content_grams, level_down
+from .models import Fact, Finding, LEVEL_RANK, Relation, _normalize, content_grams, level_down
 from .report_lab_adapter import card_entities, card_to_findings, iter_cards
 from .structure_store import StructureStore
 from .verify_hooks import make_verifier
@@ -52,7 +52,7 @@ class IngestReport:
 
     def __post_init__(self):
         if self.level_dist is None:
-            self.level_dist = {"A": 0, "B+": 0, "B": 0, "C": 0, "D": 0}
+            self.level_dist = {lv: 0 for lv in LEVEL_RANK}   # 档位从唯一定义点派生
 
 
 class ResearchIngestor:
@@ -81,14 +81,15 @@ class ResearchIngestor:
         card_entity_names: 卡片级实体名,供结构关系补全第二端(C3)。
         card: 源卡片,供主体归属(点名匹配 / title 锚定主导主体,治未知主体)。
         """
-        cat = classify_finding(f, llm=self.llm_classify)
+        cat, reason = classify_with_reason(f, llm=self.llm_classify)
 
         if cat == "background":
             # v3:留痕而非无痕丢弃——"不该要"与"没判对"必须事后可区分(同 _util.read_jsonl
-            # 静默吞行的教训)。不进 FTS/向量,不参与检索。
+            # 静默吞行的教训)。不进 FTS/向量,不参与检索。reason 分档(boilerplate /
+            # llm_override / no_entity_no_number),此前一律硬编码成最后一种,审计字段失真。
             report.background += 1
             self.facts.log_background(f.doc_id, f.claim, f.entities, f.source_date,
-                                      f.source_kind, reason="no_entity_no_number")
+                                      f.source_kind, reason=reason or "no_entity_no_number")
             return
 
         if cat == "structure":
@@ -122,6 +123,18 @@ class ResearchIngestor:
         code = code_map.get(_normalize(subject))
         etype = "stock" if code else "concept"
         cid = self.registry.resolve(subject, type_=etype, stock_code=code)
+
+        # (doc, claim) 判重预检(与 facts_store.upsert 同一判定点 find_doc_claim_dup):同文同句已有行
+        # 就不做质疑体检——此前体检在 upsert 之前,dup_skipped 的 finding 仍累加 report.doubts,
+        # 且可能白跑一次联网佐证。预检与 upsert 因并发插入不一致时以 upsert 为准(无害)。
+        if self.facts.find_doc_claim_dup([f.doc_id], f.claim, cid) is not None:
+            self.facts.last_upsert_dup = True
+            report.dup_skipped += 1
+            ents = [e for e in (f.entities or []) if isinstance(e, str) and e.strip()]
+            same = self.facts.find_doc_claim_dup([f.doc_id], f.claim, cid)
+            if ents and same["status"] in ("active", "disputed"):
+                self.facts.set_extra_entities(same["fact_id"], ents)
+            return
 
         # 质疑体检:产出存疑标记,随事实落库(供六段式展示)
         doubts = []
@@ -227,6 +240,11 @@ class ResearchIngestor:
         if src == dst:
             self._structure_fallback(f, report, code_map, card, "structure_same_ends")
             return
+        if UNKNOWN_CID in (src, dst):
+            # 端点被注册表判成垃圾(归到未知主体):不建"未知主体"hub 边(生产曾累积 464 条,
+            # neighbors() 会把"未知主体"当邻居)。
+            self._structure_fallback(f, report, code_map, card, "structure_unknown_end")
+            return
         self.structure.upsert(Relation(
             src=src, rel_type=rel_type, dst=dst, sources=[f.doc_id],
         ))
@@ -234,8 +252,11 @@ class ResearchIngestor:
 
     def _structure_fallback(self, f: Finding, report: IngestReport, code_map, card,
                             reason: str) -> None:
-        """结构边造不出来时的去向:有实体 → view 入 facts;无实体 → background_log。"""
-        if any(isinstance(e, str) and e.strip() for e in (f.entities or [])):
+        """结构边造不出来时的去向:有**非垃圾**实体 → view 入 facts;否则 → background_log。
+
+        判"有实体"必须与 classify._has_real_entity 同口径(审核 F8):此前用"任意非空串",
+        仅垃圾端("海外市场")的 structure 句会落成 subject=未知主体 的 view(生产 171 行)。"""
+        if has_real_entity(f):
             self._ingest_fact(f, "view", report, code_map or {}, card=card)
         else:
             report.background += 1

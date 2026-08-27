@@ -178,6 +178,10 @@ def auto_verify_fresh(facts: list[dict], today_ord: int, *, max_n: int = 5,
     for f in facts:
         if f.get("evidence_level") not in ("C", "D"):
             continue
+        # view(有主体的定性论断,恒 unverifiable、成色天然 C/D)不进核验:它不是可被公告佐证/打脸的
+        # 硬事实,却会占满 max_n 名额、还可能被澄清公告判 contradicted 写成 disputed(审核 F9)。
+        if f.get("category") == "view" or f.get("predicate") == "HAS_VIEW":
+            continue
         if not code_from_canonical(f.get("canonical_id", "")):
             continue
         claim = (f.get("claim") or "").strip()

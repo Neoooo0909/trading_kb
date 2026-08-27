@@ -61,7 +61,7 @@ def cmd_ask(args) -> None:
                 vl.append(f"    {v.tag()}")
                 if v.matched_title:
                     vl.append(f"    对应公告:[{v.matched_category}] {v.matched_title[:40]}")
-                if v.status == "contradicted":
+                if v.status == "contradicted" and f.get("category") in ("hard_fact", "quant_fact"):
                     facts.mark_disputed(f["fact_id"])
                     vl.append("    → 已标记 disputed(与公告相悖)")
             verify_block = "\n".join(vl)
@@ -87,37 +87,59 @@ def cmd_stats(args) -> None:
     structure = StructureStore(config.STRUCTURE_DB)
     print("=== 三层规模 ===")
     print("实体注册表:", reg.stats())
-    print("时序事实层:", facts.stats())
+    fs = facts.stats()
+    print("时序事实层:", {k: fs[k] for k in ("total", "by_status", "by_level")})
+    print("  按类别(active):", fs["by_category"], "| background 留痕:", fs["background_log"])
+    print("  doc_claim:", fs["doc_claim"], "| FTS:", fs["fts"])
+    print(f"  schema v{fs['schema_version']} | idx_facts_doubt: {fs['doubt_index']}"
+          + ("" if fs["doubt_index"] and fs["schema_version"] >= 2 else "  ⚠ 跑 ./tkb migrate"))
     print("结构关系层:", structure.stats())
     reg.close(); facts.close(); structure.close()
 
 
-def cmd_critique(args) -> None:
-    """列出最该质疑的事实(排序逻辑在 critique.collect_doubts,与 web 共用)。"""
+def cmd_critique(args) -> int:
+    """列出最该质疑的事实(排序逻辑在 critique.collect_doubts,与 web 共用)。
+
+    候选池只取**带质疑标记**的行(2026-08-27 审核 F1):此前 query(limit=5000) 按成色降序截断,
+    生产库前 5000 条全是 A 级公告、A 级带质疑数为 0,质疑榜恒为空且不报错。
+    """
     from .critique import collect_doubts
     config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
     try:
-        total, ranked = collect_doubts(
-            facts.query(include_invalidated=False, limit=5000), top=args.top or 15)
-        print(f"=== 最该质疑的 {len(ranked)} 条(共 {total} 条带质疑)===")
+        pool = facts.query_with_doubts(limit=5000)
+        total_db = facts.count_with_doubts() if facts.has_doubt_index() else None
+        total, ranked = collect_doubts(pool, top=args.top or 15)
+        scope = f"库内带质疑 {total_db} 条," if total_db is not None else ""
+        print(f"=== 最该质疑的 {len(ranked)} 条({scope}候选池取严重度最高的 {len(pool)} 条)===")
+        if not facts.has_doubt_index():
+            print("  ⚠ 未建 idx_facts_doubt(跑 ./tkb migrate),本次为全表扫描取数。")
+        if not ranked:
+            print("库内没有带质疑标记的活跃事实(真空,非取样偏差)。")
         for f, doubts in ranked:
             print(f"\n• {f['claim'][:60]}  [{f['evidence_level']}级]")
             for d in doubts:
                 icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(d.get("severity"), "•")
                 print(f"    {icon} {d.get('message','')}")
+        return 0
     finally:
         facts.close()
 
 
-def cmd_deep_check(args) -> None:
-    """深度质疑闭环:对可疑硬事实拉公告正文核对口径(需联网)。"""
+def cmd_deep_check(args) -> int:
+    """深度质疑闭环:对可疑硬事实拉公告正文核对口径(需联网)。
+
+    候选池:带质疑 + hard_fact + 证券代码(query_with_doubts 按严重度取,审核 F1);
+    --all 时放宽为不要求质疑标记(按成色取前 5000 条硬事实)。
+    """
     import json
     from .deep_verify import deep_verify_fact
     config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
-    rows = facts.query(include_invalidated=False, limit=5000)
-    # 选:硬事实 + 带证券代码 + 有质疑标记
+    if args.all:
+        rows = facts.query(include_invalidated=False, limit=5000)
+    else:
+        rows = facts.query_with_doubts(limit=5000, categories=["hard_fact"], code_only=True)
     cand = []
     for f in rows:
         if f.get("category") != "hard_fact":
@@ -125,18 +147,13 @@ def cmd_deep_check(args) -> None:
         cid = f.get("canonical_id", "")
         if not (cid[:2] in ("SH", "SZ", "BJ") and cid[2:].isdigit()):
             continue
-        try:
-            has_doubt = bool(json.loads(f.get("extra") or "{}").get("doubts"))
-        except Exception:
-            has_doubt = False
-        if has_doubt or args.all:
-            cand.append(f)
+        cand.append(f)
     if not cand:
-        print("没有可深度核对的硬事实(需:hard_fact + 证券代码 + 质疑标记)。")
+        print("没有可深度核对的硬事实(需:hard_fact + 证券代码 + 质疑标记)——真空,非取样偏差。")
         print("提示:量化研报语料里硬事实少;行业/公司研报语料下此功能价值更大。")
-        facts.close(); return
+        facts.close(); return 0
 
-    print(f"=== 深度核对 {min(len(cand), args.top)} 条可疑硬事实(联网拉公告)===")
+    print(f"=== 深度核对 {min(len(cand), args.top)} 条可疑硬事实(候选 {len(cand)} 条,联网拉公告)===")
     for f in cand[:args.top]:
         v = deep_verify_fact(f)
         print(f"\n• {f['claim'][:50]}  [{f['canonical_id']}]")
@@ -148,6 +165,7 @@ def cmd_deep_check(args) -> None:
             facts.mark_disputed(f["fact_id"])
             print("    → 已标记 disputed(说法与公告相悖)")
     facts.close()
+    return 0
 
 
 def _read_fragments(path: Path) -> list[tuple[str, str]]:
@@ -166,7 +184,7 @@ def cmd_feed_chat(args) -> None:
     path = Path(args.file).expanduser()
     if not path.is_file():            # is_file:空串归一为目录"."、传目录都会绕过 exists() 后崩 read_text
         print(f"✗ 找不到文件(需为普通文件):{path}")
-        return
+        return 2
     reg = EntityRegistry(config.ENTITY_DB)
     lane = SentimentLane(config.SENTIMENT_DB, reg)
     if args.watch:
@@ -176,7 +194,7 @@ def cmd_feed_chat(args) -> None:
     if not watch:
         print("⚠️  关注标的池为空:注册表暂无股票实体,且未传 --watch。")
         print('    先 `./tkb ingest` 入研报建立标的池,或显式 `--watch "绿的谐波,宁德时代"`。')
-        reg.close(); lane.close(); return
+        reg.close(); lane.close(); return 2
 
     stance_fn = None
     if config.USE_LLM:                       # B：碎片立场走 LLM
@@ -207,7 +225,7 @@ def cmd_add(args) -> None:
     if not scripts.exists():
         print(f"✗ 找不到 report_lab/scripts({scripts}),无法抽卡。")
         print("  研报抽取依赖 report_lab;若只想入已有卡片,直接 `./tkb ingest`。")
-        return
+        return 2
     paths = [str(Path(p).expanduser()) for p in args.paths]
     # 入口预检:全部路径都不存在就别启动流水线——②extract 是耗 API 额度的抽卡步,
     # 敲错路径不应空跑白耗额度(report_lab 对坏文件只标 FAIL 但整批 returncode=0,挡不住)。
@@ -216,7 +234,7 @@ def cmd_add(args) -> None:
         print("✗ 以下路径均不存在,已中止(不消耗 API):")
         for p in missing:
             print(f"   - {p}")
-        return
+        return 2
     if missing:
         print(f"⚠️  {len(missing)} 个路径不存在,将跳过:{', '.join(missing)}")
         paths = [p for p in paths if Path(p).exists()]
@@ -234,7 +252,7 @@ def cmd_add(args) -> None:
         r = subprocess.run(cmd, cwd=str(scripts))
         if r.returncode != 0:
             print(f"✗ 该步失败(returncode={r.returncode}),已中止。")
-            return
+            return 2
     print("\n▶ ④ tkb 提纯入三层库")
     cmd_ingest(argparse.Namespace(limit=None))
 
@@ -345,18 +363,38 @@ def cmd_deep(args) -> None:
     reg.close(); facts.close(); structure.close()
 
 
-def cmd_docclaim(args) -> None:
-    """(doc, claim) 判重索引:build 全量/对账回填(幂等) / status 看规模与悬空。"""
+def cmd_docclaim(args) -> int:
+    """(doc, claim) 判重索引:build 全量/对账回填(含 migrate + 清悬空,幂等) / status 看规模与悬空。"""
+    config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
-    if args.action == "status":
-        st = facts.doc_claim_status()
-        print(f"doc_claim 行数 {st['rows']} | 指向不存在事实(悬空) {st['dangling']}")
-        if st["dangling"]:
-            print("  ⚠ 有悬空:fact_id 被脚本改写却未 remap,跑 `./tkb docclaim build` 后再查。")
-    else:
-        print("▶ 回填 doc_claim(全表扫描,active 优先登记,幂等)…")
-        r = facts.doc_claim_build()
-        print(f"✓ 扫描 {r['facts_scanned']} 条事实,新登记 {r['inserted']} 条,索引共 {r['doc_claim_rows']} 条")
+    try:
+        if args.action == "status":
+            st = facts.doc_claim_status()
+            print(f"doc_claim 行数 {st['rows']} | 指向不存在事实(悬空) {st['dangling']}")
+            if st["dangling"]:
+                print("  ⚠ 有悬空:fact_id 被脚本改写却未 remap;跑 `./tkb docclaim build` 清理并补登记。")
+        else:
+            print("▶ 回填 doc_claim(先 migrate/清悬空,再全表扫描登记,active 优先,幂等)…")
+            r = facts.doc_claim_build()
+            print(f"✓ 扫描 {r['facts_scanned']} 条事实,新登记 {r['inserted']} 条,清悬空 {r['dangling_removed']} 条,"
+                  f"索引共 {r['doc_claim_rows']} 条")
+        return 0
+    finally:
+        facts.close()
+
+
+def cmd_migrate(args) -> int:
+    """库 schema 迁移(显式执行,避开 01:00 kbsync):doc_claim 三元主键 + idx_facts_doubt + user_version。
+    写锁通常 <1 分钟;并发进程照常等待。绝不在打开库时自动做(见 facts_store.SCHEMA_VERSION)。"""
+    config.ensure_data_dir()
+    facts = FactsStore(config.FACTS_DB)
+    try:
+        r = facts.migrate()
+        print(f"schema v{r['from']} → v{r['to']} | doc_claim 主键: {r['doc_claim_pk']} | "
+              f"idx_facts_doubt: {r['doubt_index']}")
+        return 0 if not str(r["doubt_index"]).startswith(("failed", "skipped")) else 2
+    finally:
+        facts.close()
 
 
 def cmd_fts(args) -> None:
@@ -392,7 +430,7 @@ def cmd_semantic(args) -> None:
     idx = SemanticIndex.shared(config.FACTS_DB, prefer=(getattr(args, "prefer", None) or "bge"))
     if idx is None:
         print("✗ 语义层不可用(.venv-embed/模型/numpy 缺失)。检查 .venv-embed 与模型目录。")
-        return
+        return 2
     facts = FactsStore(config.FACTS_DB)
     n_facts = facts.count_active()
     if args.action == "status":
@@ -526,13 +564,17 @@ def main(argv=None) -> int:
     pdc = sub.add_parser("docclaim", help="(doc,claim) 判重索引:build 全量/对账回填 / status")
     pdc.add_argument("action", choices=["build", "status"])
     pdc.set_defaults(func=cmd_docclaim)
+    pmg = sub.add_parser("migrate", help="库 schema 迁移(doc_claim 三元主键/质疑索引/user_version),显式执行")
+    pmg.set_defaults(func=cmd_migrate)
     pft = sub.add_parser("fts", help="关键词索引(FTS5+BM25):build 对账补建 / status 看覆盖")
     pft.add_argument("action", choices=["build", "status"])
     pft.set_defaults(func=cmd_fts)
 
     args = p.parse_args(argv)
-    args.func(args)
-    return 0
+    # 退出码协议(ARCHITECTURE §2.2):子命令返回 int,0=成功/真没数据,2=故障或依赖缺失;
+    # 此前 main 恒 return 0,编排层(kb_sync run_step)永远拿不到失败信号。
+    rc = args.func(args)
+    return int(rc or 0)
 
 
 if __name__ == "__main__":

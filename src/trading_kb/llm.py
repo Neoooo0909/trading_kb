@@ -17,7 +17,7 @@ from . import config
 from .models import Finding
 
 _RL_SCRIPTS = Path.home() / "report_lab" / "scripts"
-_CATEGORIES = ("hard_fact", "structure", "quant_fact", "background")
+_CATEGORIES = ("hard_fact", "structure", "quant_fact", "view", "background")
 
 _chat_fn = None
 
@@ -73,7 +73,8 @@ _CLASSIFY_PROMPT = """你是A股投研信息分类器。判断下面这条信息
 - hard_fact: 可证伪的硬事实（订单/中标/产能/定点/价格/政策，通常带主体+数字或日期）
 - quant_fact: 量化因子/回测表现（IC/夏普/年化/多空收益等）
 - structure: 产业链/上下游/归属关系（A是B的供应商、A属于B板块）
-- background: 定性背景/观点/情绪，无可验证硬信息
+- view: 有明确主体（某公司/某股票/某产品）的定性判断或观点，无可证伪的数字或事件
+- background: 无明确主体的宏观/情绪/套话背景
 
 信息：{claim}
 类别："""
@@ -82,7 +83,10 @@ _CLASSIFY_PROMPT = """你是A股投研信息分类器。判断下面这条信息
 def make_llm_classify():
     """返回可注入 run_ingest(llm_classify=) 的分类钩子：llm(finding)->Category|None。
 
-    LLM 不可用或答非四类 → 返回 None，调用方自动回退规则核心（见 classify_finding）。
+    LLM 不可用或答非五类(含 view,2026-08-27 补) → 返回 None，调用方回退规则核心。
+    采纳规则在 classify._apply_llm_override:只在规则判低置信档(view/background)时介入,
+    且 view/background 之间的改判须与"有无真实主体"一致——LLM 实际保留的是
+    "把规则漏掉的硬事实/结构/量化捞回来"的能力。
     """
     def _classify(f: Finding) -> Optional[str]:
         r = complete(_CLASSIFY_PROMPT.format(claim=f.claim[:300]), max_tokens=12)

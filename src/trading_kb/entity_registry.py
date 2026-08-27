@@ -12,8 +12,8 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from .entity_quality import is_garbage_entity
-from .models import _normalize
+from .entity_quality import is_garbage_entity, is_pseudo_company
+from .models import Relation, _normalize
 
 # 垃圾实体(日期/纯数值/法条/地域/通用词)登记时一律归到此主键,不污染注册表
 UNKNOWN_CID = "concept:未知主体"
@@ -63,6 +63,12 @@ class EntityRegistry:
         """
         if not stock_code and is_garbage_entity(name, type_):
             return UNKNOWN_CID
+        # 伪公司闸门(2026-08-27 下沉到此,单一定义点):LLM 把"北美AI集群/HBM先进封装"这类主题短语
+        # 标成 company → 降为 concept 登记。此前只在 ingest.ingest_card 里判,kb_adapter 手抄的
+        # 实体循环、_ingest_cross_market、llm_attribute_unknown 都绕过了它,retype 两天后 08-27
+        # 又再生 91 个。带 stock_code 的路径不受影响(有代码就是真证券)。
+        if type_ == "company" and not stock_code and is_pseudo_company(name):
+            type_ = "concept"
         cid = self._canonical_id(name, type_, stock_code)
         # A2:INSERT OR IGNORE 消除 SELECT-then-INSERT 的并发竞态
         self.conn.execute(
@@ -126,6 +132,12 @@ class EntityRegistry:
         调用方(merge_fragments / merge_typo_fragments / merge_concept_companies /
         merge_english_fragments,以及将来任何新增的合并脚本)。
         """
+        # 护栏(审核 A P2-18):自合并与成环都会让 _follow_merge 把该实体"合并到自己/对方",
+        # watch_terms 不再含该股、resolve 结果漂移。出声跳过而非抛错(调用方多是批处理脚本)。
+        if from_id == into_id or self._follow_merge(into_id) == from_id:
+            import sys as _sys
+            print(f"⚠ merge({from_id} → {into_id}) 跳过:自合并或会形成合并环", file=_sys.stderr)
+            return
         self.conn.execute("UPDATE entities SET merged_into=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.execute("UPDATE aliases SET canonical_id=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.commit()
@@ -179,16 +191,19 @@ class EntityRegistry:
                     sc.execute("DELETE FROM relations WHERE rel_id=?", (r["rel_id"],))
                     changed += 1
                     continue
-                key = f"{_normalize(src)}|{r['rel_type']}|{_normalize(dst)}"
-                rid = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+                # rel_id 口径唯一定义点 = models.Relation.rel_id,不手抄哈希(§2.3)
+                rid = Relation(src=src, rel_type=r["rel_type"], dst=dst).rel_id
                 if rid == r["rel_id"]:
                     sc.execute("UPDATE relations SET src=?, dst=? WHERE rel_id=?", (src, dst, rid))
                 elif sc.execute("SELECT 1 FROM relations WHERE rel_id=?", (rid,)).fetchone():
                     ex = sc.execute("SELECT sources FROM relations WHERE rel_id=?", (rid,)).fetchone()
                     srcs = sorted(set(json.loads(ex["sources"] or "[]")
                                       + json.loads(r["sources"] or "[]")))
-                    sc.execute("UPDATE relations SET sources=?, support_count=? WHERE rel_id=?",
-                               (json.dumps(srcs, ensure_ascii=False), len(srcs) or 1, rid))
+                    # low_confidence 与 StructureStore.upsert 同口径(孤证=1):并入后多源须重算
+                    sc.execute("UPDATE relations SET sources=?, support_count=?, low_confidence=? "
+                               "WHERE rel_id=?",
+                               (json.dumps(srcs, ensure_ascii=False), len(srcs) or 1,
+                                int(len(srcs) < 2), rid))
                     sc.execute("DELETE FROM relations WHERE rel_id=?", (r["rel_id"],))
                 else:
                     sc.execute("UPDATE relations SET rel_id=?, src=?, dst=? WHERE rel_id=?",
@@ -196,8 +211,9 @@ class EntityRegistry:
                 changed += 1
             sc.commit()
             return changed
-        except sqlite3.Error as exc:
-            print(f"⚠ merge({from_id}) 关系改指失败(注册表已提交,关系维持原状): {exc}")
+        except (sqlite3.Error, ValueError) as exc:      # ValueError:sources 列非法 JSON
+            import sys as _sys
+            print(f"⚠ merge({from_id}) 关系改指失败(注册表已提交,关系维持原状): {exc}", file=_sys.stderr)
             return 0
         finally:
             if sc is not None:

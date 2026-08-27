@@ -244,13 +244,51 @@ def classify_finding(f: Finding, llm=None) -> Category:
     # 6) 其余为背景(无主体无数字的宏观/情绪复述、套话)→ ingest 写 background_log 留痕
     else:
         cat = "background"
+    return _apply_llm_override(cat, llm(f) if llm is not None else None, f)
 
-    # LLM 复判(预留):仅在开启且规则给出低置信时介入
-    if llm is not None:
-        override = llm(f)
-        if override in ("hard_fact", "structure", "quant_fact", "view", "background"):
-            cat = override
-    return cat
+
+_ALL_CATS = ("hard_fact", "structure", "quant_fact", "view", "background")
+
+
+def _apply_llm_override(cat: Category, override, f: Finding) -> Category:
+    """LLM 复判的采纳规则(2026-08-27 审核 F2;此前无条件覆盖,且 LLM 词表没有 view)。
+
+    只在规则判**低置信档**(view / background)时介入——hard/quant/structure 是精度护栏钉住的判定,
+    不让 12-token 分类器推翻。view ↔ background 的改判必须与"有无真实主体"一致(有主体才能是 view,
+    无主体才能是 background),否则 LLM 会造出 subject=未知主体 的 view(F8 同款缺陷换门重现);
+    改判 quant_fact 须 `_has_metric`,否则没有指标锚、进 requalify 又要手术。
+    LLM 实际保留的能力 = 把规则漏掉的硬事实/结构/量化捞回来。"""
+    if override not in _ALL_CATS or override == cat:
+        return cat
+    if cat not in ("view", "background"):
+        return cat
+    if override == "background" and _has_real_entity(f):
+        return cat
+    if override == "view" and not _has_real_entity(f):
+        return cat
+    if override == "quant_fact" and not _has_metric(f):
+        return cat
+    return override
+
+
+def classify_with_reason(f: Finding, llm=None) -> tuple:
+    """同 classify_finding,另返回 background 的判定原因(供 ingest 留痕审计):
+    boilerplate(黑名单模板)/ llm_override(LLM 把低置信档改判为 background)/
+    no_entity_no_number(规则兜底)/ ''(非 background)。"""
+    rule_cat = classify_finding(f, llm=None)
+    cat = _apply_llm_override(rule_cat, llm(f) if llm is not None else None, f)
+    if cat != "background":
+        return cat, ""
+    if _BOILERPLATE.search(f.claim or ""):
+        return cat, "boilerplate"
+    if rule_cat != "background":
+        return cat, "llm_override"
+    return cat, "no_entity_no_number"
+
+
+def has_real_entity(f: Finding) -> bool:
+    """公共名:finding 是否带至少一个非垃圾实体(ingest._structure_fallback 与 view 档同口径)。"""
+    return _has_real_entity(f)
 
 
 def predicate_for(f: Finding) -> str:

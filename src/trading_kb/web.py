@@ -103,8 +103,8 @@ def critique_payload(top: int = 20) -> dict:
     config.ensure_data_dir()
     facts = FactsStore(config.FACTS_DB)
     try:
-        total, ranked = collect_doubts(
-            facts.query(include_invalidated=False, limit=5000), top=top)
+        # 候选池只取带质疑行(审核 F1):query(limit=5000) 按成色截断在生产库上全是 A 级、0 条带质疑
+        total, ranked = collect_doubts(facts.query_with_doubts(limit=5000), top=top)
         items = [{"claim": f["claim"][:80], "level": f["evidence_level"],
                   "flags": [{"severity": d.get("severity"),
                              "message": d.get("message", "")} for d in doubts]}
@@ -432,7 +432,9 @@ async function ask(){
 }
 function renderAsk(d){
   if(!d.found){
-    $('#askOut').innerHTML=`<div class="empty"><div class="ic">🔍</div><p>知识库里没找到与「${esc(d.query)}」匹配的事实。<br>先入相关研报，或换更具体的实体/主线词。</p></div>`;
+    let w='';
+    if(d.warnings&&d.warnings.length){w='<div class="warn" style="margin-top:8px">⚠ 检索告警：'+d.warnings.map(esc).join('；')+'</div>';}
+    $('#askOut').innerHTML=`<div class="empty"><div class="ic">🔍</div><p>知识库里没找到与「${esc(d.query)}」匹配的事实。<br>先入相关研报，或换更具体的实体/主线词。</p></div>`+w;
     return;
   }
   let h='';

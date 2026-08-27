@@ -282,17 +282,31 @@ class SemanticIndex:
         mat_p, ids_p = self._cache_paths()
         try:
             tmp_m = Path(str(mat_p) + ".tmp")
-            if from_tmp is not None and rows and rows == getattr(self._mat, "shape", (0,))[0]:
-                self._mat.flush()                     # memmap 已就地写好,零额外内存
-                del self._mat
-                os.replace(from_tmp, mat_p)
-                self._mat = np.load(str(mat_p), mmap_mode="r")
+            if from_tmp is not None and rows == getattr(self._mat, "shape", (0,))[0]:
+                # 不 `del self._mat`:若 os.replace 失败(磁盘满/权限/跨盘),属性消失会让本进程
+                # 之后每次 search/score 都 AttributeError → 永久空结果(审核 A P1-4)。失败时回退
+                # 到内存副本(能装下)或继续用 .tmp memmap 并出声。
+                old = self._mat
+                old.flush()                           # memmap 已就地写好,零额外内存
+                try:
+                    os.replace(from_tmp, mat_p)
+                    self._mat = np.load(str(mat_p), mmap_mode="r")
+                except OSError as e:
+                    print(f"[semantic] 矩阵缓存落盘失败(本进程继续用临时矩阵;下次 build 前请重启常驻进程)"
+                          f"({type(e).__name__}: {e})", file=sys.stderr)
+                    try:
+                        self._mat = np.array(old, dtype="float32")   # 拷进内存,不再依赖会被覆写的 .tmp
+                    except MemoryError:
+                        self._mat = old
+                    return
             else:
                 with open(tmp_m, "wb") as fh:         # 用文件句柄:np.save 对非 .npy 名会自动加后缀
                     np.save(fh, np.ascontiguousarray(self._mat, dtype="float32"))
                 os.replace(tmp_m, mat_p)
             tmp_i = Path(str(ids_p) + ".tmp")
-            tmp_i.write_text(json.dumps({"key": self._cache_key(), "ids": self._ids},
+            key = getattr(self, "_key_at_load", None) or self._cache_key()
+            self._key_at_load = None
+            tmp_i.write_text(json.dumps({"key": key, "ids": self._ids},
                                         ensure_ascii=False), encoding="utf-8")
             os.replace(tmp_i, ids_p)
         except Exception as e:
@@ -304,11 +318,14 @@ class SemanticIndex:
         长驻 web 进程期间外部跑 `tkb semantic build` 不再静默用旧矩阵。
         优先磁盘缓存(P1-D);未命中才从 BLOB 逐行读,读完顺手落盘。"""
         ver = self._db_version()
-        if self._mat is not None and ver == self._mat_ver:
+        if getattr(self, "_mat", None) is not None and ver == self._mat_ver:
             return
         if self._load_matrix_cache():
             self._mat_ver = ver
             return
+        # 缓存指纹在**装载开始前**取:装载 210s 期间若 build 又提交了几批,装载后取 COUNT 会记成
+        # 更大的条数,写出"key 说 N+k 条、矩阵只有 N 行"的缓存,被下个进程接受(审核 A P2-25)。
+        self._key_at_load = self._cache_key()
         # 直接写盘 memmap 再逐行填充(2026-08-26):旧写法 list(全量) → vstack(全量) → m/norms(全量)
         # 同时持有三份副本,190 万×512 float32 时峰值 ~11.6GB,8GB 机器必然换页(回填后必现)。
         # 现在数据直接落到缓存文件的 memmap 上、逐行归一化,常驻内存只有页缓存(可被 OS 回收)。
@@ -328,16 +345,23 @@ class SemanticIndex:
             arr = np.empty((n, dim), dtype="float32")
             used_memmap = False
         i = 0
-        for fid, blob in self._conn.execute("SELECT fact_id, vec FROM vectors"):
-            if i >= n:                               # 并发新增:本轮只收指纹对应的前 n 条
-                break
-            v = np.frombuffer(blob, dtype="float32")
-            if v.shape[0] != dim:                    # 维度不符(换后端/半截 BLOB)→ 跳过,不污染矩阵
-                continue
-            nrm = float(np.linalg.norm(v)) or 1.0
-            arr[i] = v / nrm
-            ids.append(fid)
-            i += 1
+        try:
+            for fid, blob in self._conn.execute("SELECT fact_id, vec FROM vectors"):
+                if i >= n:                           # 并发新增:本轮只收指纹对应的前 n 条
+                    break
+                v = np.frombuffer(blob, dtype="float32")
+                if v.shape[0] != dim:                # 维度不符(换后端/半截 BLOB)→ 跳过,不污染矩阵
+                    continue
+                nrm = float(np.linalg.norm(v)) or 1.0
+                arr[i] = v / nrm
+                ids.append(fid)
+                i += 1
+        except Exception:
+            # 读 BLOB 中途异常(disk I/O error 等):别把 3.8GB 的半截 .tmp 留在盘上(审核 A P2-24)
+            if used_memmap:
+                del arr
+                tmp_m.unlink(missing_ok=True)
+            raise
         if i < n and used_memmap:
             # 真实行数少于预分配(维度不符被跳过/并发删除):.npy 头部行数必须与 ids 数一致,
             # 否则读端形状校验永远拒收、每次 ask 都退回 BLOB 全量重建。按真实行数分块重写一份。
