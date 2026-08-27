@@ -496,3 +496,77 @@ def test_B2_launcher_creates_copy_dir(tmp_path):
     r = subprocess.run(["bash", str(Path(__file__).resolve().parent.parent / "tkb"), "ask", "无此实体xyz"],
                        env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0 and (tmp_path / "alt" / "last_ask.md").exists()
+
+
+# ═══════════ 第三批(交叉验证条件)═══════════════════════════════════════════
+def test_N1_migrate_is_atomic_on_failure(tmp_path, monkeypatch):
+    db = tmp_path / "f.db"
+    c = sqlite3.connect(db)
+    c.executescript("""
+        CREATE TABLE facts(fact_id TEXT PRIMARY KEY, dedup_key TEXT UNIQUE, subject TEXT, predicate TEXT,
+          object TEXT, canonical_id TEXT, claim TEXT, status TEXT, evidence_level TEXT, unverifiable INTEGER,
+          source_kind TEXT, support_count INTEGER, sources TEXT, valid_at TEXT, invalid_at TEXT,
+          supersedes TEXT, relation_id TEXT, category TEXT, extra TEXT);
+        CREATE TABLE doc_claim(doc_id TEXT NOT NULL, ckey INTEGER NOT NULL, fact_id TEXT NOT NULL,
+          PRIMARY KEY(doc_id, ckey)) WITHOUT ROWID;
+        INSERT INTO doc_claim VALUES('d1', 7, 'f1');
+    """)
+    c.commit(); c.close()
+    fs = FactsStore(db)
+    real_conn = fs.conn
+
+    class Crashing:                                   # sqlite3.Connection 的属性只读,用代理注入故障
+        def execute(self, sql, *a, **k):
+            if sql.startswith("ALTER TABLE doc_claim_v2"):
+                raise sqlite3.OperationalError("simulated crash mid-migration")
+            return real_conn.execute(sql, *a, **k)
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+    monkeypatch.setattr(fs, "conn", Crashing())
+    with pytest.raises(sqlite3.OperationalError):
+        fs.migrate()
+    monkeypatch.setattr(fs, "conn", real_conn)
+    other = sqlite3.connect(db)
+    names = {r[0] for r in other.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "doc_claim" in names and "doc_claim_v2" not in names          # 旧表原样,无半成品
+    assert other.execute("SELECT fact_id FROM doc_claim").fetchone()[0] == "f1"
+    other.close()
+    assert fs.migrate()["doc_claim_pk"] == "migrated"                    # 重跑成功
+
+
+def test_N2_reattribute_merge_keeps_loser_entity_searchable_after_fts_build(tmp_path):
+    ce = _load("clean_entities")
+    fs = FactsStore(tmp_path / "facts.db")
+    a = Fact(subject="A", predicate="P", object="o", canonical_id="concept:A", claim="旧行",
+             sources=["a"], extra={"entities": ["甲骨文特殊词"]})
+    b = Fact(subject="B", predicate="P", object="o", canonical_id="SH600001", claim="新行", sources=["b"])
+    fs.upsert(a); fs.upsert(b)
+    assert [f["claim"] for f in fs.search("甲骨文特殊词")] == ["旧行"]
+    assert ce._reattribute(fs.conn, a.fact_id, "SH600001", "B") == "merged"
+    fs.conn.commit()
+    fs.fts_build()
+    assert [f["claim"] for f in fs.search("甲骨文特殊词")] == ["新行"]     # 合并进 keeper 的实体名可检索
+
+
+def test_F20_verify_subject_skips_garbage_and_ib_firms():
+    from trading_kb.web_enrich import verify_subject
+    f = _finding("高盛上调目标价,XX科技获大额订单", entities=["高盛", "海外市场", "XX科技"])
+    assert verify_subject(f) == "XX科技"
+    assert verify_subject(_finding("无实体", entities=["海外市场"])) is None
+
+
+def test_F6_matrix_cache_save_failure_keeps_matrix(tmp_path, monkeypatch):
+    import numpy as np
+    from trading_kb import semantic as S
+    class FakeBackend:
+        name, dim, vec_db_name, query_prefix, worker, model_dir, model_file = "fake", 4, "v.db", "", None, None, None
+    idx = S.SemanticIndex(tmp_path / "facts.db", FakeBackend())
+    idx._conn.executemany("INSERT INTO vectors(fact_id, vec) VALUES(?,?)",
+                          [(f"f{i}", np.full(4, i + 1, dtype="float32").tobytes()) for i in range(3)])
+    idx._conn.commit()
+    monkeypatch.setattr(S.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    idx._load_matrix()
+    assert getattr(idx, "_mat", None) is not None and idx._mat.shape == (3, 4) and idx._ids == ["f0", "f1", "f2"]
+    idx._load_matrix()                                                    # 二次加载不抛、不重建
+    assert idx._mat.shape == (3, 4)
+    idx.close()

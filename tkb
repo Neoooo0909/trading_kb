@@ -14,4 +14,4 @@ if [ "${1:-}" = "ask" ]; then
   PYTHONPATH="$DIR/src" python3 -u -m trading_kb.cli "$@" | tee "${DATA}/last_ask.md"
   exit "${PIPESTATUS[0]}"
 fi
-PYTHONPATH="$DIR/src" exec python3 -m trading_kb.cli "$@"
+PYTHONPATH="$DIR/src" exec python3 -u -m trading_kb.cli "$@"

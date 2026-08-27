@@ -243,14 +243,11 @@ def collect_doubts(rows: list[dict], top: int = 20) -> tuple[int, list]:
     rows: facts.query 返回的事实行。按 doubt_severity 排序,返回 (带质疑总数,
     [(fact_row, doubts), ...] 前 top 条)。
     """
-    import json as _json
+    from .facts_store import extra_of                    # 唯一 extra 解析(list 形 extra 不再崩)
     rank = {"high": 3, "medium": 2, "low": 1}
     scored = []
     for f in rows:
-        try:
-            extra = _json.loads(f.get("extra") or "{}")
-        except Exception:
-            extra = {}
+        extra = extra_of(f)
         doubts = extra.get("doubts") or []
         if doubts:
             scored.append((rank.get(extra.get("doubt_severity"), 0), f, doubts))

@@ -81,11 +81,11 @@
 | Fact 主键口径 | `models.Fact.fact_id`（sha1(dedup_key)[:16]） | scripts/clean_entities._reattribute 手抄（已加不变量测试钉住） |
 | 事实行合并口径 | `facts_store.merge_fact_rows()`（纯函数）+ `ensure_merged_archive/archive_fact_row` | dedup_same_claim.merge_rows / requalify._merge_into / _reattribute 各一份（2026-08-27 收敛；_reattribute 此前根本不合并、纯 DELETE） |
 | doc_claim remap | `FactsStore.doc_claim_remap_conn(conn, old, new)`（`UPDATE OR REPLACE`） | clean_entities / requalify / dedup 三份手抄裸 UPDATE（三元主键下会撞唯一约束） |
-| extra JSON 解析 | `facts_store.extra_of(row)` | ask/critique/deep_verify/web/dedup 各一套（两套对 `[1,2]` 会崩） |
+| extra JSON 解析 | `facts_store.extra_of(row)`（ask/critique/dedup 已接；`ask._vn/_doubts/_doubt_icon`、`set_extra_entities/patch_extra` 仍自解析但带 try/except，待收敛） | ask/critique/deep_verify/web/dedup 各一套（两套对 `[1,2]` 会崩） |
 | 伪公司闸门 | `EntityRegistry.register`（company 且无 stock_code 且 `is_pseudo_company` → concept） | ingest.ingest_card 一处（kb_adapter/_ingest_cross_market/llm_attribute_unknown 绕过它，08-27 再生 91 个） |
 | 订单族键集 | `ingest._ORDER_PROGRESSION` | announcements_to_kb `_ORDER_FAMILY`（2026-08-27 改为引用，有测试） |
 | 成色档位表(前端) | `models.LEVEL_RANK` → `web._page()` 注入 JS `LEVELS` | web.py JS 手抄 LV/LVCLS/lvbar 三处 |
-| JSONL/行读取 | `trading_kb.jsonl.iter_lines/iter_jsonl`（只认 `\n`） | 4 个夜跑脚本 `read_text().splitlines()`（U+2028 切碎 JSON，历史坑 #9 复发） |
+| JSONL/行读取 | `trading_kb.jsonl.iter_lines/iter_jsonl`（只认 `\n`；scripts 已接，kb_adapter 仍用自有 `_util.read_jsonl`（同语义，待接）） | 4 个夜跑脚本 `read_text().splitlines()`（U+2028 切碎 JSON，历史坑 #9 复发） |
 | 治理脚本连接 | `scripts/_db.open_db`（busy_timeout=30000 + Row） | 8 处裸 `sqlite3.connect` |
 
 ### 2.4 SQLite 并发与备份策略
@@ -173,7 +173,6 @@ launchd com.kbsync.daily (01:00)
 launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
 cli 退出码：0 = 成功/真没数据(critique/deep-check 空池)，2 = 故障或依赖缺失(feed-chat 文件不存在、add 抽卡失败、
 semantic 层不可用、migrate 建索引失败)；`main()` 透传子命令返回值。
-launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
 ```
 
 退出码协议见 §2.2。所有国内数据源请求必须显式直连

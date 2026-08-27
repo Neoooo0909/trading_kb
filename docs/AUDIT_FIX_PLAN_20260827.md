@@ -1,6 +1,6 @@
 # trading_kb 全面审核 · 发现与修复方案（2026-08-27）
 
-> 状态：**方案待独立审核**。审核对象 = 分支 `recall-fix-20260825` 快照 `ed56df5`（多会话 08-25~08-27 未提交改动原样入库，已推 GitHub）+ `scripts/` 本地库 `3202f0c`。
+> 状态：**已独立审核（有条件通过，条件全部采纳，见 §7）并分两批实施（见 §8）；交叉验证见 §9**。审核对象 = 分支 `recall-fix-20260825` 快照 `ed56df5`（多会话 08-25~08-27 未提交改动原样入库，已推 GitHub）+ `scripts/` 本地库 `3202f0c`。
 > 方法：四路独立子 agent 逐行精读（数据层 / 摄入层 / 问答展示层 / 治理脚本与测试）+ 主审对每条 P0/P1 复核代码与只读查生产库。基线 `run_tests.py` 246 passed / 2 skipped。
 > 四份原始报告在会话 scratchpad `audit_{A,B,C,D}_*.md`（不入库）。
 
@@ -207,16 +207,32 @@
 
 ## 8. 实施记录（2026-08-27）
 
-- **第一批**（提交 `2e83120` / scripts `4ff0a5e`，14:25）：F1–F9、F11、F12、F14–F21 + `supersede` 护栏 + `iter_lines`。
+- **第一批**（提交 `2e83120` / scripts `4ff0a5e`，14:25）：F1–F9、F11、F12、F14–F19、F21 + `supersede` 护栏 + `iter_lines`。F20 漏做，交叉验证抓出后在第三批补上。
   `tests/test_audit_fix_20260827.py` 30 例；全套 276 passed / 2 skipped。`test_recall_fix.py` 两例改 raw 行模拟存量伪公司（审核条件 ⑤）。
 - **部署（生产库，14:25–14:33，kbsync/回填均未运行，lsof 无写者）**：
   - 热备 `.backup/facts.db.bak.audit_20260827_142533`（backup API，2.9GB，8s）
   - `./tkb migrate`：schema v0→v2，doc_claim 主键迁移 + `idx_facts_doubt` 建成，36s；`./tkb docclaim build` 新登记 632 条（此前登记不上的例外行等）、悬空 0，35s
   - `./tkb critique` 从恒空变为有料：库内带质疑 341,082 条；EXPLAIN 走 `idx_facts_doubt`；分档等值点查后耗时 8.7s（其中 count 与 5000 行回表为主）
   - `retype_pseudo_companies.py --apply`：改型 91 个 08-27 再生的伪公司，重挂事实 92 / 关系 84，三库热备 `*.bak.retype_20260827_142825`；`fts build` 对账 0 漂移；doc_claim 悬空 0
-  - `backfill_valid_at.py --apply`：卡片层无新可补（1,227 仍无来源）；事实层 13 行 NULL 由定向脚本按卡片已回填日期走 `apply_facts`（run_id `20260827_null_fix`，可 `--undo`）补齐
+  - `backfill_valid_at.py --apply`：卡片层无新可补（1,227 仍无来源）；事实层 13 行 NULL 中 7 行有卡片日期，由定向脚本走 `apply_facts` 补齐（run_id `20260827_null_fix`，可 `--undo`）；余 6 行来源卡无任何日期，留空（=未知）
 - **第二批**（本提交）：F10 补齐、F13、F22（展示不限 + LLM 材料预算 `SENTIMENT_MATERIAL_SHARE`）、view 打标/payload category、web `LEVEL_RANK` 注入、stats 扩展、语义/FTS 降级进 warnings、`--audit` 直取历史行、debate/deep_ask 窗口收进 config、revalue 跳 view、grade 显式登记 social_research、`tkb` 启动器、`_DATEONLY_NUM_RE` 收窄/扩展、文档同步。
   全套 284 passed / 2 skipped。
 - **`_DATEONLY_NUM_RE` 生产回放**（4 个 lane 各 500 卡只读回放，新旧规则类别迁移）：cards 1.26%（36 hard→view / 2 view→hard）、ima 0.46%（36/9）、zsxq_research 0.40%（52/3）、report_lab 0.21%（7/3）。
   hard→view 的都是只含时长/日期区间的句子（"库存仅能维持3至6个月""认证周期1~2年""7月16日为申购日"），view→hard 的是 `5000/1330/1800/3810` 这类被旧式当年份误拦的真量值——方向均符合预期。存量不重判（fact_id 不变原则），只影响新入库。
 - **未做/待用户拍板**：§4 清单；决策 ⑥ scripts 库仍无远端（本地提交）；决策 ⑦ LLM 分流默认开启的量化。
+
+## 9. 交叉验证（2026-08-27，独立 agent，报告在会话 scratchpad `cross_verify.md`）
+
+结论：**有条件通过**——F1–F22 中 21 条已消除、F20 未做；§7 六项条件全部落实；`run_tests.py` 284 绿；随机 12 个新测试回放到审核前快照 `ed56df5` 全部失败、新树全部通过（钉住有效）；生产库只读快照与 §8 一致（user_version 2、三元主键、`idx_facts_doubt` 走索引、`json_valid(extra)=0` 为 0、伪公司残留 0/107,371、doc_claim 悬空 0）。
+
+四项条件已在第三批全部处理：
+| # | 发现 | 处理 |
+|---|---|---|
+| N1 | `migrate()` 主键迁移用 `executescript`，会先 COMMIT 掉 `BEGIN IMMEDIATE` 再逐条自动提交——中途失败留下"doc_claim 已 DROP 只剩 v2"（生产已迁移成功故无损，回滚到 v1 备份再迁会踩） | 改逐条 `execute` 真事务 + `DROP TABLE IF EXISTS doc_claim_v2` 防残留 + 失败 rollback；测试 `test_N1_migrate_is_atomic_on_failure`（代理连接注入中途异常，旧表原样、重跑成功） |
+| F20 | 第一批漏做，§8 却计入 | `web_enrich.verify_subject`：首个非垃圾、非作者投行实体；无则不查（=None，三态协议）；测试 `test_F20_verify_subject_skips_garbage_and_ib_firms`；§8 改实 |
+| N2 | `_reattribute`/`requalify._merge_into` 合并后 keeper 的 FTS 映射行不刷新，`fts_build` 只补缺不重写——合并进 keeper 的实体名检索不到，注释误导 | 新增 `FactsStore.fts_drop_row_conn`，合并后删 keeper 映射行让 `fts build` 按缺失重建；测试 `test_N2_…searchable_after_fts_build` |
+| F6 | 无回归测试 | `test_F6_matrix_cache_save_failure_keeps_matrix`（假后端 + monkeypatch `os.replace` 抛 OSError → `_mat` 仍在、二次加载早退）。验证员另指出 macOS 上 3.9GB `np.array` 不抛 MemoryError 而是换页，`except MemoryError` 分支实际不可达——保留为兜底，不依赖它 |
+
+顺手采纳的 P2：`critique.collect_doubts` 改用 `extra_of`；`tkb` exec 分支补 `-u`；ARCHITECTURE §2.3 两条"唯一实现"措辞改实（`extra_of` 部分接入、`jsonl` kb_adapter 未接）、§4 重复行删除。未采纳/登记：存量 171 行未知主体 view 清理；`scan_typo_fragments/llm_unknown_audit/llm_unknown_verify` 三个非夜跑脚本裸连；web `critique_payload.total` 口径；档内顺序不稳定（展示级）。
+
+最终：`run_tests.py` **288 passed / 2 skipped**。

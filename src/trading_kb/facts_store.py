@@ -257,6 +257,20 @@ class FactsStore:
     def doc_claim_remap(self, old_fact_id: str, new_fact_id: str) -> int:
         return self.doc_claim_remap_conn(self.conn, old_fact_id, new_fact_id)
 
+    @staticmethod
+    def fts_drop_row_conn(conn, fact_id: str) -> None:
+        """删掉某事实的 FTS 映射行(表不存在静默)。治理脚本合并后对 keeper 调它:`fts_build` 只补
+        "active 里未映射的"与清孤儿、**不重写已映射行**——合并进 keeper 的实体名若不删旧映射,
+        永远进不了索引(交叉验证 N2)。删了之后下次 `tkb fts build` 按"缺失"重建。"""
+        try:
+            mp = conn.execute("SELECT id FROM fts_map WHERE fact_id=?", (fact_id,)).fetchone()
+            if mp:
+                conn.execute("DELETE FROM facts_fts WHERE rowid=?", (mp[0],))
+                conn.execute("DELETE FROM fts_map WHERE id=?", (mp[0],))
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+
     def doc_claim_clean_dangling(self) -> int:
         """删掉指向已不存在事实的登记(被绕过 FactsStore 的脚本删行且未 remap 留下的)。
         二元主键时代它们会占着主键让新登记被 IGNORE(判重空洞);三元主键下只是垃圾,但仍清。"""
@@ -298,19 +312,26 @@ class FactsStore:
         out = {"from": self.schema_version(), "doc_claim_pk": "ok", "doubt_index": "ok"}
         if self._doc_claim_pk_arity() < 3:
             def _rebuild():
+                # 逐条 execute 而非 executescript:后者会先 COMMIT 掉挂起的 BEGIN IMMEDIATE 再逐条自动提交,
+                # 中途失败会留下"doc_claim 已 DROP、只剩 doc_claim_v2"的半成品(交叉验证 N1 实验证实)。
+                # 单条 DDL 在 sqlite 3.6+ 不隐式提交,整段是真事务:失败 rollback 后旧表原样。
                 self.conn.execute("BEGIN IMMEDIATE")
-                self.conn.executescript(
-                    """
-                    CREATE TABLE doc_claim_v2 (
-                        doc_id  TEXT NOT NULL, ckey INTEGER NOT NULL, fact_id TEXT NOT NULL,
-                        PRIMARY KEY (doc_id, ckey, fact_id)) WITHOUT ROWID;
-                    INSERT OR IGNORE INTO doc_claim_v2(doc_id, ckey, fact_id)
-                        SELECT doc_id, ckey, fact_id FROM doc_claim;
-                    DROP TABLE doc_claim;
-                    ALTER TABLE doc_claim_v2 RENAME TO doc_claim;
-                    CREATE INDEX IF NOT EXISTS idx_doc_claim_fid ON doc_claim(fact_id);
-                    """)
-                self.conn.commit()
+                try:
+                    for stmt in (
+                        "DROP TABLE IF EXISTS doc_claim_v2",           # 上次中断残留(事务外残留才可能)
+                        "CREATE TABLE doc_claim_v2 (doc_id TEXT NOT NULL, ckey INTEGER NOT NULL, "
+                        "fact_id TEXT NOT NULL, PRIMARY KEY (doc_id, ckey, fact_id)) WITHOUT ROWID",
+                        "INSERT OR IGNORE INTO doc_claim_v2(doc_id, ckey, fact_id) "
+                        "SELECT doc_id, ckey, fact_id FROM doc_claim",
+                        "DROP TABLE doc_claim",
+                        "ALTER TABLE doc_claim_v2 RENAME TO doc_claim",
+                        "CREATE INDEX IF NOT EXISTS idx_doc_claim_fid ON doc_claim(fact_id)",
+                    ):
+                        self.conn.execute(stmt)
+                    self.conn.commit()
+                except BaseException:
+                    self.conn.rollback()
+                    raise
             self._write_retry(_rebuild, "doc_claim 主键迁移")
             out["doc_claim_pk"] = "migrated"
         if not self.has_doubt_index():

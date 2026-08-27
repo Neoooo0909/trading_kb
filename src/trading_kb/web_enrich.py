@@ -81,15 +81,27 @@ def _verify_via_authoritative(f: Finding, predicate: str) -> Optional[str]:
     return "no_evidence"
 
 
+def verify_subject(f: Finding):
+    """验证用的主体名:首个**非垃圾、非作者投行**的实体(与 ingest._pick_subject 的前两级同口径,
+    不含 attribute_subject 兜底)。此前取 entities[0],"高盛,XX公司"的订单句会去查高盛的公告,
+    拿 30 条无关公告判 no_evidence 把事实降档(审核 F20)。无可用实体 → None(=没查)。"""
+    from .entity_quality import is_garbage_entity, is_ib_firm
+    for e in (f.entities or []):
+        if isinstance(e, str) and e.strip() and not is_garbage_entity(e, "concept") and not is_ib_firm(e):
+            return e
+    return None
+
+
 def _fetch_recent(f: Finding) -> list:
-    """拉该主体近期公告列表(巨潮主 + 上交所兜底)。异常/未开启 → 空列表。"""
-    if not config.USE_WEB or not f.entities:
+    """拉该主体近期公告列表(巨潮主 + 上交所兜底)。异常/未开启/无可用主体 → 空列表(=没查)。"""
+    subject = verify_subject(f) if config.USE_WEB else None
+    if not subject:
         return []
     try:
         from .announcement import fetch_announcements
-        return fetch_announcements(f.entities[0], limit=30)
+        return fetch_announcements(subject, limit=30)
     except Exception as e:
         import sys
         print(f"[web_enrich] 公告查询失败({type(e).__name__}),按未尝试处理: "
-              f"{f.entities[0]}", file=sys.stderr)
+              f"{subject}", file=sys.stderr)
         return []
