@@ -411,3 +411,88 @@ def test_prune_big_groups_and_age_gate(tmp_path, monkeypatch):
     doomed_names = sorted(p.name for p in doomed)
     assert doomed_names == ["facts.db.bak_dedup_1787000000", "facts.db.bak_dedup_1787000000-wal"]   # 最老一组含 sidecar
     assert not any("bak.2026" in p.name or "ipo_ingest" in p.name for p in doomed)
+
+
+# ═══════════ 第二批(展示/一致性)═══════════════════════════════════════════
+def test_B2_dateonly_regex_coverage_and_no_false_year():
+    from trading_kb.classify import _DATEONLY_NUM_RE as R
+    dateonly = ["9月", "2026年", "2026", "2025年12月", "2026年Q1", "26Q1", "25H2", "1H26", "Q4 2025", "1月15日",
+                "年内", "2026-2027", "2026-2027年", "2026年上半年", "2026年底", "10月底", "第三季度", "本周",
+                "12-18 months", "12/07/2025", "一年", "三个月", "2026年4月", "2026年下半年", "FY25", "2026E",
+                "Q3", "上半年", "3-5月", "March 2026", "2026-08-27"]
+    quant = ["5000", "1330", "1500", "1171", "20%", "5.88亿", "33万颗", "3000万张", "45元", "1.64万吨", "100", "27.70"]
+    miss = [d for d in dateonly if not R.match(d)]
+    false_hit = [q for q in quant if R.match(q)]
+    assert not miss, miss
+    assert not false_hit, false_hit
+
+
+def test_B2_llm_material_budget_keeps_evidence(monkeypatch):
+    from trading_kb import config
+    facts = [{"fact_id": f"v{i}", "status": "active", "claim": "观点" * 30 + str(i), "evidence_level": "C",
+              "unverifiable": 1, "support_count": 1, "category": "view", "sources": '["s"]', "extra": "{}"}
+             for i in range(50)]
+    facts.append({"fact_id": "h", "status": "active", "claim": "硬事实中标 3 亿", "evidence_level": "A",
+                  "unverifiable": 0, "support_count": 1, "category": "hard_fact", "sources": '["s"]', "extra": "{}"})
+    r = AskResult(query="q", facts=facts)
+    full = r.to_six_section()
+    assert full.count("- [C级") == 50 and "另有" not in full                 # 展示层默认不限
+    monkeypatch.setattr(config, "SENTIMENT_MATERIAL_SHARE", 0.05)           # 24000×0.05 = 1200 字预算
+    mat = r.to_llm_material()
+    assert mat.count("- [C级") < 50 and "另有" in mat and "硬事实中标 3 亿" in mat
+    monkeypatch.setattr(config, "SENTIMENT_MAX_VIEWS", 3)
+    assert r.to_six_section().count("- [C级") == 3
+
+
+def test_B2_view_marks_and_payload_category(tmp_registry, tmp_facts, tmp_structure):
+    cid = tmp_registry.resolve("晓程科技", type_="stock", stock_code="300139")
+    tmp_facts.upsert(_fact("d1", "晓程科技拥有海外金矿资产", cid=cid, category="view", pred="HAS_VIEW"))
+    res = AskEngine(tmp_registry, tmp_facts, tmp_structure).ask("晓程科技", use_semantic=False)
+    six = res.to_six_section()
+    assert "(定性论断·无硬事实)" in six and "[观点]" in six
+    pl = res.to_payload()
+    assert pl["conclusion"]["category"] == "view" and pl["evidence"][0]["category"] == "view"
+
+
+def test_B2_audit_takes_history_rows_directly(tmp_registry, tmp_facts, tmp_structure):
+    cid = tmp_registry.resolve("测试股", type_="stock", stock_code="600100")
+    for i in range(130):
+        tmp_facts.upsert(_fact(f"a{i}", f"测试股A级事实{i}", cid=cid, level="A", category="hard_fact", pred=f"P{i}"))
+    old = tmp_facts.upsert(_fact("h1", "测试股旧口径", cid=cid, level="C", category="hard_fact", pred="OLD"))
+    tmp_facts.conn.execute("UPDATE facts SET status='superseded' WHERE fact_id=?", (old,)); tmp_facts.conn.commit()
+    res = AskEngine(tmp_registry, tmp_facts, tmp_structure).ask("测试股", include_invalidated=True, use_semantic=False)
+    assert [f["claim"] for f in res.invalidated_facts] == ["测试股旧口径"]   # 旧法:成色前 120 行里没有它
+
+
+def test_B2_like_degrade_and_semantic_missing_are_in_warnings(tmp_registry, tmp_facts, tmp_structure, monkeypatch):
+    tmp_facts.upsert(_fact("d1", "宁德时代产能扩张", cid="concept:宁德时代", category="hard_fact", pred="HAS_CAPACITY"))
+    monkeypatch.setattr(tmp_facts, "_fts_built", lambda: False)             # 模拟索引未建 → LIKE 降级
+    eng = AskEngine(tmp_registry, tmp_facts, tmp_structure)
+    monkeypatch.setattr(eng, "_semantic_index", lambda: None)
+    res = eng.ask("宁德时代 产能", use_semantic=True)
+    assert any("LIKE" in w for w in res.warnings) and any("语义层不可用" in w for w in res.warnings)
+
+
+def test_B2_web_page_injects_level_rank():
+    from trading_kb import web
+    from trading_kb.models import LEVEL_RANK
+    page = web._page()
+    assert "__LEVELS__" not in page and json.dumps(sorted(LEVEL_RANK, key=lambda k: -LEVEL_RANK[k])) in page
+    assert "const LV={A:" not in page                                        # 手抄表已删
+
+
+def test_B2_grade_social_research_explicit_and_revalue_skips_view():
+    from trading_kb.grade import SOURCE_KIND_BASELINE
+    from trading_kb.revalue import reweight_note
+    assert SOURCE_KIND_BASELINE["social_research"] == "C"
+    r = reweight_note([{"claim": "看好订单放量", "category": "view"},
+                       {"claim": "公司新签订单 5 亿元", "category": "hard_fact"}], {"fundamental_weight": "低"})
+    assert r["fast_n"] == 1 and all("看好" not in s for s in r["fast_samples"])
+
+
+def test_B2_launcher_creates_copy_dir(tmp_path):
+    import os, subprocess
+    env = dict(os.environ, TKB_DATA_DIR=str(tmp_path / "alt"), TKB_USE_LLM="0")
+    r = subprocess.run(["bash", str(Path(__file__).resolve().parent.parent / "tkb"), "ask", "无此实体xyz"],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and (tmp_path / "alt" / "last_ask.md").exists()

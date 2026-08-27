@@ -29,8 +29,14 @@ class AskResult:
     warnings: list[str] = field(default_factory=list)
     env: object = None                          # C·环境重估快照(EnvSnapshot);默认离线时为 None
 
-    def to_six_section(self) -> str:
-        """渲染六段式骨架(证据不足时显式提示)。"""
+    def to_six_section(self, max_views: int | None = None, sentiment_chars: int | None = None) -> str:
+        """渲染六段式骨架(证据不足时显式提示)。
+
+        max_views / sentiment_chars:情绪面段的条数/字符预算;None 取 config.SENTIMENT_MAX_VIEWS(默认 0=不限,
+        用户 2026-07-21 决定展示层全数提炼)。LLM 材料请用 to_llm_material():给情绪面一个窗口比例预算,
+        防它把证据链整体挤出材料(审核 F22 折中,默认预算 0.5×窗口 ≈170 条,当前规模不触发)。"""
+        if max_views is None:
+            max_views = config.SENTIMENT_MAX_VIEWS
         lines = [f"# 问:{self.query}", ""]
         if not self.facts and not self.neighbors:
             lines.append("**证据不足**:知识库中未找到与该查询匹配的事实或结构关系。")
@@ -47,7 +53,8 @@ class AskResult:
         if active:
             top = _top_conclusion(active)
             tag = _grade_tag(top)
-            lines.append(f"{top['claim']} {tag}")
+            note = "(定性论断·无硬事实)" if top.get("category") == "view" else ""
+            lines.append(f"{top['claim']} {tag}{note}")
         else:
             lines.append("(无 active 事实,见下方分歧/反证)")
 
@@ -61,9 +68,17 @@ class AskResult:
             lines.append("（C级/低成色多为社媒研究/媒体/专家纪要等未验证观点，也含少量查无佐证"
                          "而降级的研报口径；情绪与分歧影响短期价格、也提供对立视角，"
                          "故单列并全数提炼。可靠性待交叉验证，孤证不作独立买点。）")
+            shown, used = 0, 0
             for f in low:
-                dmark = _doubt_icon(f)
-                lines.append(f"- {_grade_tag(f)}{dmark} {f['claim']}")
+                line = f"- {_grade_tag(f)}{_doubt_icon(f)} {f['claim']}"
+                if (max_views and shown >= max_views) or (sentiment_chars and used + len(line) > sentiment_chars):
+                    break
+                lines.append(line)
+                shown += 1
+                used += len(line) + 1
+            if shown < len(low):
+                lines.append(f"（另有 {len(low) - shown} 条低成色观点未列;展示上限 TKB_SENTIMENT_MAX_VIEWS / "
+                             f"LLM 材料预算 TKB_SENTIMENT_MATERIAL_SHARE 可调）")
 
         # 证据链(带成色编号 + 质疑图标)——完整展现全部相关事实,不截断
         # (relevance<=0 的无关项已在 _rank_facts 过滤;此处不再二次截断,
@@ -71,7 +86,8 @@ class AskResult:
         lines.append("\n## 证据链")
         for i, f in enumerate(active, 1):
             dmark = _doubt_icon(f)
-            lines.append(f"[F{i}] {_grade_tag(f)}{dmark} {f['claim']}  "
+            vmark = "[观点]" if f.get("category") == "view" else ""
+            lines.append(f"[F{i}] {_grade_tag(f)}{dmark}{vmark} {f['claim']}  "
                          f"(来源{f['support_count']}篇, 数字校验{_vn(f)})")
 
         # 质疑提示(批判性体检:无出处/过于乐观/回测软肋)——覆盖全部证据
@@ -134,6 +150,12 @@ class AskResult:
             lines.extend(f"- {w}" for w in self.warnings)
         return "\n".join(lines)
 
+    def to_llm_material(self) -> str:
+        """喂给 LLM 合成层的材料:与展示同源(to_six_section),只多一条情绪面字符预算。"""
+        share = config.SENTIMENT_MATERIAL_SHARE
+        budget = int(config.SYNTH_MATERIAL_CHARS * share) if share > 0 else None
+        return self.to_six_section(sentiment_chars=budget)
+
     def to_payload(self) -> dict:
         """结构化六段的**唯一出口**(ARCHITECTURE.md §2.3),web/JSON 渲染从这里取数。
 
@@ -172,6 +194,7 @@ class AskResult:
                 "claim": top["claim"], "level": top["evidence_level"],
                 "unverifiable": bool(top["unverifiable"]),
                 "doubt": _extra(top).get("doubt_severity"),
+                "category": top.get("category"),          # 前端据此标"定性论断"
             }
         for i, f in enumerate(active, 1):
             e = _extra(f)
@@ -179,7 +202,7 @@ class AskResult:
                 "idx": i, "claim": f["claim"], "level": f["evidence_level"],
                 "unverifiable": bool(f["unverifiable"]),
                 "support": f["support_count"], "verified": e.get("verified_numbers", 0),
-                "doubt": e.get("doubt_severity"),
+                "doubt": e.get("doubt_severity"), "category": f.get("category"),
             })
             for d in (e.get("doubts") or []):
                 out["doubts"].append({"idx": i, "severity": d.get("severity"),
@@ -253,16 +276,24 @@ class AskEngine:
                 canonical_id=cid, levels=["C", "D"], limit=60, order="recent"))
             result.neighbors = self.structure.neighbors(cid)
         pool = _merge_facts(pool, self.facts.search(query, limit=400))
+        if getattr(self.facts, "last_search_mode", "fts") == "like":
+            result.warnings.append("关键词召回已降级为 LIKE(FTS 未建或异常,跑 ./tkb fts build)")
         if want_sem:
-            pool = _merge_facts(pool, self._semantic_recall(query, top_k=120))
+            if self._semantic_index() is None:
+                result.warnings.append("语义层不可用,仅关键词召回(检查 .venv-embed/模型/向量库)")
+            else:
+                pool = _merge_facts(pool, self._semantic_recall(query, top_k=120))
 
         result.facts = self._rank_facts(query, pool, cid, use_semantic=want_sem,
                                         ent_aliases=ent_aliases)
 
         if cid and include_invalidated:
-            allf = self.facts.query(canonical_id=cid, include_invalidated=True, limit=120)
-            result.invalidated_facts = [f for f in allf
-                                        if f["status"] in ("superseded", "invalidated", "expired")]
+            # 直取历史状态行(此前取成色前 120 行再过滤,重覆盖标的只看到一小部分:SZ002353 4/53)
+            hist = ("superseded", "invalidated", "expired")
+            result.invalidated_facts = self.facts.query(canonical_id=cid, statuses=hist, limit=120)
+            n_hist = self.facts.count_by_status(cid, hist)
+            if n_hist > len(result.invalidated_facts):
+                result.warnings.append(f"历史行 {n_hist} 条,--audit 只列最新 {len(result.invalidated_facts)} 条")
         if not cid and result.facts:
             result.warnings.append("未定位到具体实体,已用关键词+语义加权检索")
         elif not cid:

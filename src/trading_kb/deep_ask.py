@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 
+from . import config
 from . import llm as _llm
 
 _PLAN = """你是投研研究规划员。把下面的问题拆成 3-5 个需要查证的子问题。
@@ -110,7 +111,7 @@ def deep_ask(query: str, engine, tools=None, complete=None, max_steps: int = 6) 
     evidence.append(f"[计划] {plan}")
     steps: list[tuple] = []
     for _ in range(max_steps):
-        raw = complete(_STEP.format(query=query, evidence="\n".join(evidence)[:6000]),
+        raw = complete(_STEP.format(query=query, evidence="\n".join(evidence)[:config.DEBATE_MATERIAL_CHARS]),
                        max_tokens=200) or "{}"
         try:
             act = json.loads(_extract_json(raw))
@@ -120,7 +121,7 @@ def deep_ask(query: str, engine, tools=None, complete=None, max_steps: int = 6) 
         steps.append((action, arg))
         if action == "done" or not action:
             break
-        evidence.append(f"[{action}:{arg}]\n{_run_tool(action, arg, engine, tools)[:800]}")
-    answer = complete(_SUMMARY.format(query=query, evidence="\n".join(evidence)[:7000]),
+        evidence.append(f"[{action}:{arg}]\n{_run_tool(action, arg, engine, tools)[:max(800, config.DEBATE_MATERIAL_CHARS // 6)]}")
+    answer = complete(_SUMMARY.format(query=query, evidence="\n".join(evidence)[:config.DEBATE_MATERIAL_CHARS]),
                       max_tokens=1800, tier="answer") or "(无输出)"
     return {"plan": plan, "steps": steps, "evidence": evidence, "answer": answer}

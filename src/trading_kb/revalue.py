@@ -256,8 +256,10 @@ def reweight_note(facts: list[dict], verdict: dict) -> dict:
     (订单/交付/减值等)对**当前股价**的解释力被稀释，应在交易含义里下调其即时权重、
     标注"当前由框架/beta 主导"；慢变量(护城河类)不受影响。返回渲染所需的分组计数。
     """
-    fast = [f for f in facts if classify_fact_speed(f.get("claim", "")) == "快变量"]
-    slow = [f for f in facts if classify_fact_speed(f.get("claim", "")) == "慢变量"]
+    # view(定性论断)不是可定价的事实,不进快/慢变量统计与示例(审核 C P2)
+    hard = [f for f in facts if f.get("category") != "view"]
+    fast = [f for f in hard if classify_fact_speed(f.get("claim", "")) == "快变量"]
+    slow = [f for f in hard if classify_fact_speed(f.get("claim", "")) == "慢变量"]
     downweight = verdict.get("fundamental_weight") == "低"
     return {"fast_n": len(fast), "slow_n": len(slow),
             "downweight_fast": downweight,

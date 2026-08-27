@@ -202,3 +202,21 @@
 | P2-3 dup 分支多 source 并入 | **本轮不做**（当前调用方全单 source，规格待定） | 登记 §4 |
 | F6 回退后 `.tmp` 被下个进程覆写 | 采纳 | 回退时若内存可容纳则 `np.array` 拷入内存，否则出声"请重启" |
 | 新决策点 ⑦ LLM 分流默认开启（收窄为只升硬后每条 finding 一次调用） | 不改默认，登记给用户 | `./tkb` 启动器 `TKB_USE_LLM=1` 是用户既定口径；量化"升硬命中率"作后续任务 |
+
+---
+
+## 8. 实施记录（2026-08-27）
+
+- **第一批**（提交 `2e83120` / scripts `4ff0a5e`，14:25）：F1–F9、F11、F12、F14–F21 + `supersede` 护栏 + `iter_lines`。
+  `tests/test_audit_fix_20260827.py` 30 例；全套 276 passed / 2 skipped。`test_recall_fix.py` 两例改 raw 行模拟存量伪公司（审核条件 ⑤）。
+- **部署（生产库，14:25–14:33，kbsync/回填均未运行，lsof 无写者）**：
+  - 热备 `.backup/facts.db.bak.audit_20260827_142533`（backup API，2.9GB，8s）
+  - `./tkb migrate`：schema v0→v2，doc_claim 主键迁移 + `idx_facts_doubt` 建成，36s；`./tkb docclaim build` 新登记 632 条（此前登记不上的例外行等）、悬空 0，35s
+  - `./tkb critique` 从恒空变为有料：库内带质疑 341,082 条；EXPLAIN 走 `idx_facts_doubt`；分档等值点查后耗时 8.7s（其中 count 与 5000 行回表为主）
+  - `retype_pseudo_companies.py --apply`：改型 91 个 08-27 再生的伪公司，重挂事实 92 / 关系 84，三库热备 `*.bak.retype_20260827_142825`；`fts build` 对账 0 漂移；doc_claim 悬空 0
+  - `backfill_valid_at.py --apply`：卡片层无新可补（1,227 仍无来源）；事实层 13 行 NULL 由定向脚本按卡片已回填日期走 `apply_facts`（run_id `20260827_null_fix`，可 `--undo`）补齐
+- **第二批**（本提交）：F10 补齐、F13、F22（展示不限 + LLM 材料预算 `SENTIMENT_MATERIAL_SHARE`）、view 打标/payload category、web `LEVEL_RANK` 注入、stats 扩展、语义/FTS 降级进 warnings、`--audit` 直取历史行、debate/deep_ask 窗口收进 config、revalue 跳 view、grade 显式登记 social_research、`tkb` 启动器、`_DATEONLY_NUM_RE` 收窄/扩展、文档同步。
+  全套 284 passed / 2 skipped。
+- **`_DATEONLY_NUM_RE` 生产回放**（4 个 lane 各 500 卡只读回放，新旧规则类别迁移）：cards 1.26%（36 hard→view / 2 view→hard）、ima 0.46%（36/9）、zsxq_research 0.40%（52/3）、report_lab 0.21%（7/3）。
+  hard→view 的都是只含时长/日期区间的句子（"库存仅能维持3至6个月""认证周期1~2年""7月16日为申购日"），view→hard 的是 `5000/1330/1800/3810` 这类被旧式当年份误拦的真量值——方向均符合预期。存量不重判（fact_id 不变原则），只影响新入库。
+- **未做/待用户拍板**：§4 清单；决策 ⑥ scripts 库仍无远端（本地提交）；决策 ⑦ LLM 分流默认开启的量化。

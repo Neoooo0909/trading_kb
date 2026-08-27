@@ -27,7 +27,8 @@ def cmd_ingest(args) -> None:
     print("=== 摄入回执(研报重 lane)===")
     print(f"卡片 {rep.cards} | findings {rep.findings} | 实体登记 {rep.entities_registered}")
     print(f"硬事实 {rep.hard_facts} | 量化事实 {rep.quant_facts} | "
-          f"结构关系 {rep.structures} | 定性论断(view) {rep.views} | 背景(留痕) {rep.background}")
+          f"结构关系 {rep.structures} | 定性论断(view) {rep.views} | 背景(留痕) {rep.background} | "
+          f"同文同句判重跳过 {rep.dup_skipped}")
     print(f"成色分布 {rep.level_dist}")
     print(f"质疑标记 {rep.doubts} 条(其中高严重度 {rep.doubt_high} 条)→ 用 `./tkb critique` 看清单")
 
@@ -69,7 +70,8 @@ def cmd_ask(args) -> None:
     if config.USE_LLM:                       # C：Sonnet 合成自然语言回答
         from .llm import synthesize_answer
         # 核验结论前置:确保不被 material 截断,且作为最新已核实信号被合成层重点纳入
-        material = (verify_block + "\n\n" + six) if verify_block else six
+        llm_six = res.to_llm_material()          # 与展示同源,情绪面按窗口比例预算(F22)
+        material = (verify_block + "\n\n" + llm_six) if verify_block else llm_six
         ans = synthesize_answer(args.query, material)
         if ans:
             print(ans)

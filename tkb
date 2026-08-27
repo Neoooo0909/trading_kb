@@ -6,8 +6,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export TKB_USE_LLM="${TKB_USE_LLM:-1}"
 # ask 完整六段输出 tee 一份到文件做持久全文副本：终端会折叠长工具输出（+N lines），
 # 文件保证随时可取全文（cat data/last_ask.md）。其余子命令照常 exec。
+# 2026-08-27:副本目录跟 TKB_DATA_DIR 走并先 mkdir -p(此前目录不存在时 tee 报错但 rc 仍 0、无副本);
+# python3 -u 让 stderr 告警与正文不错位。
 if [ "${1:-}" = "ask" ]; then
-  PYTHONPATH="$DIR/src" python3 -m trading_kb.cli "$@" | tee "$DIR/data/last_ask.md"
+  DATA="${TKB_DATA_DIR:-$DIR/data}"
+  mkdir -p "${DATA}"
+  PYTHONPATH="$DIR/src" python3 -u -m trading_kb.cli "$@" | tee "${DATA}/last_ask.md"
   exit "${PIPESTATUS[0]}"
 fi
 PYTHONPATH="$DIR/src" exec python3 -m trading_kb.cli "$@"

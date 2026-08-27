@@ -25,6 +25,7 @@ SOURCE_KIND_BASELINE: dict[str, EvidenceLevel] = {
     "company_ir": "B",
     "expert_meeting": "C",
     "media_report": "C",
+    "social_research": "C",           # 社媒深度研究(星球/ima 卡片):此前靠默认值得到 C,显式登记防漂移
     "social_chat": "D",
     "market_price": "A",
     "manual_review": "B",

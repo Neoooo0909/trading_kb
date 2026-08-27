@@ -80,7 +80,7 @@
 
 ## 6. 实施记录（2026-08-27）
 
-- 00:53–00:56 `scripts/backfill_valid_at.py --apply`（用户 00:52「开跑」；kbsync 01:00 前 20 分钟为下载阶段不碰 facts.db，且每批 UPDATE 带乐观条件）：备份 `.backup/facts.db.bak_valid_at_20260827_005504`；**卡片写入 24,304 张**（留空 1,227：无来源 1,202 + 多源冲突 25），mtime 原样保留（抽检 3,000 张 `.ingested.txt` 键全一致，01:00 kbsync 不会重入）；**事实更新 560,336 行**（7 行因并发改动跳过），run_id `20260827_005504`，`--undo 20260827_005504` 可整体回滚。耗时 219s。
+- 00:53–00:56 `scripts/backfill_valid_at.py --apply`（用户 00:52「开跑」；kbsync 01:00 前 20 分钟为下载阶段不碰 facts.db，且每批 UPDATE 带乐观条件）：备份 `.backup/facts.db.bak_valid_at_20260827_005504`；**卡片写入 24,304 张**（留空 1,227：无来源 1,202 + 多源冲突 25），mtime 原样保留（抽检 3,000 张 `.ingested.txt` 键全一致，01:00 kbsync 不会重入）；**事实更新 560,336 行**（7 行"因并发改动跳过"——2026-08-27 审核查明实为脚本盲区：`valid_at IS NULL` 的 13 行被归一成 `''` 后用 `AND valid_at=''` 做乐观条件永不匹配；已改 `COALESCE(valid_at,'')` 并于当日 `--apply` 补齐），run_id `20260827_005504`，`--undo 20260827_005504` 可整体回滚。耗时 219s。
 - 验收：active 1,842,742 中空 valid_at **597,024（32.4%）→ 37,986（2.1%）**；日历非法 133 → **0**、未来日期 3 → **0**。来源分布：zsxq_post 460,368 / pdf_creation 63,845 / filename 33,492 / pdf_mod 1,465 / cleaned_invalid 97。仍空的 37,986：broker_research 26,670 / foreign_ib 10,140 / social 1,176（无卡 5,096 + 无任何日期来源的卡）。
 - `./tkb ask "东田微"`：研报侧（B 级 2026–2028 盈利预测、光隔离器/滤光片产品细节）已进入"可靠依据"段。
 - 入库闸口三处已随 00:00 前的代码落地生效（`dates.clean_date` 于 `upsert` 入口、`ingested_at` 列自动迁移、`ima_to_card` 统一日期解析），222 tests 绿；kbsync 今晚新入的卡将自带 `date_source`。

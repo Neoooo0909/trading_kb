@@ -56,6 +56,14 @@ FAST_PATH_MIN_FACTS = int(os.environ.get("TKB_FAST_PATH_MIN_FACTS", "10"))
 # LLM 合成层看到的材料包上限(字符)。旧值 8000 只够证据链前 ~70 条,候选池 500+ 时
 # 排在后面的相关事实对 LLM 等于不存在。
 SYNTH_MATERIAL_CHARS = int(os.environ.get("TKB_SYNTH_MATERIAL_CHARS", "24000"))
+# 情绪面·不同观点段(C/D 级 view)的展示条数上限:0 = 不限(用户 2026-07-21 决定:全数提炼,偏完整性)。
+# v3 回填后单次 ask 该段 95–137 条;若刷屏可用 TKB_SENTIMENT_MAX_VIEWS 设上限,超出以"另有 N 条"代替。
+SENTIMENT_MAX_VIEWS = int(os.environ.get("TKB_SENTIMENT_MAX_VIEWS", "0"))
+# LLM 材料里情绪面段允许占窗口的比例(展示层不受影响):防止该段把证据链整体挤出 LLM 材料。
+# 默认 0.5 × SYNTH_MATERIAL_CHARS ≈ 12k 字 ≈ 170 条,当前规模不会触发;置 0 = 不限。
+SENTIMENT_MATERIAL_SHARE = float(os.environ.get("TKB_SENTIMENT_MATERIAL_SHARE", "0.5"))
+# debate / deep_ask 的材料窗口(此前硬编码 5000–7000 字,未随 P0-C 扩窗):按主窗口比例派生。
+DEBATE_MATERIAL_CHARS = int(os.environ.get("TKB_DEBATE_MATERIAL_CHARS", str(SYNTH_MATERIAL_CHARS // 2)))
 
 
 def ensure_data_dir() -> None:

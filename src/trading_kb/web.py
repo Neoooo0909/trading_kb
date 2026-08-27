@@ -45,7 +45,7 @@ def ask_payload(query: str, audit: bool) -> dict:
         out = res.to_payload()
         if config.USE_LLM and out["found"]:   # C：Sonnet 合成
             from .llm import synthesize_answer
-            out["synthesis"] = synthesize_answer(query, res.to_six_section())
+            out["synthesis"] = synthesize_answer(query, res.to_llm_material())
         return out
     finally:
         reg.close(); facts.close(); structure.close()
@@ -121,9 +121,17 @@ def ingest_payload() -> dict:
     return {"cards": rep.cards, "findings": rep.findings,
             "hard_facts": rep.hard_facts, "quant_facts": rep.quant_facts,
             "structures": rep.structures, "views": rep.views,
-            "background": rep.background, "entities": rep.entities_registered,
+            "background": rep.background, "dup_skipped": rep.dup_skipped,
+            "entities": rep.entities_registered,
             "level_dist": rep.level_dist, "doubts": rep.doubts,
             "doubt_high": rep.doubt_high}
+
+
+def _page() -> str:
+    """前端页面:把 models.LEVEL_RANK 的档位(高→低)注入 JS 常量,JS 不再手抄成色表。"""
+    from .models import LEVEL_RANK
+    levels = sorted(LEVEL_RANK, key=lambda k: -LEVEL_RANK[k])
+    return PAGE.replace("__LEVELS__", json.dumps(levels))
 
 
 # ── HTTP 处理 ────────────────────────────────────────────────────────────────
@@ -171,7 +179,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/":
-                self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                self._send(200, _page().encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/api/stats":
                 self._json(stats_payload())
             elif path == "/api/critique":
@@ -403,8 +411,9 @@ footer code{background:#ececf5;padding:2px 7px;border-radius:5px}
 <script>
 const $=s=>document.querySelector(s), esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // 展示映射与 models.LEVEL_RANK 档位对齐(新增档位需同步);'B+' 的 CSS class 用安全名 Bp
-const LV={A:'A级','B+':'B+级',B:'B级',C:'C级',D:'D级'};
-const LVCLS={A:'A','B+':'Bp',B:'B',C:'C',D:'D'};
+const LEVELS=__LEVELS__;  /* 由 models.LEVEL_RANK 注入(单一定义点),高→低 */
+const LV=Object.fromEntries(LEVELS.map(l=>[l,l+'级']));
+const LVCLS=Object.fromEntries(LEVELS.map(l=>[l,l.replace('+','p')]));
 function badge(level,unver){return `<span class="badge ${LVCLS[level]||'D'}">${esc(LV[level]||level+'级')}${unver?'<span class="v">·待验证</span>':''}</span>`;}
 function dotFor(sev){return sev?`<span class="dot ${esc(sev)}" title="质疑：${esc(sev)}"></span>`:'';}
 
@@ -513,7 +522,7 @@ $('#feedBtn').onclick=feed;
 function lvbar(dist){
   const tot=Object.values(dist).reduce((a,b)=>a+b,0)||1;
   const col={A:'var(--A)','B+':'#7c3aed',B:'var(--B)',C:'var(--C)',D:'var(--D)'};
-  let s='';for(const k of['A','B+','B','C','D']){const w=(dist[k]||0)/tot*100;if(w>0)s+=`<i style="width:${w}%;background:${col[k]}" title="${k}级 ${dist[k]}"></i>`;}
+  let s='';for(const k of LEVELS){const w=(dist[k]||0)/tot*100;if(w>0)s+=`<i style="width:${w}%;background:${col[k]}" title="${k}级 ${dist[k]}"></i>`;}
   return `<div class="lvbar">${s}</div>`;
 }
 async function loadStats(){
@@ -539,7 +548,7 @@ async function reingest(){
     if(d.error){alert('失败：'+d.error);}
     else{loaded.stats=false;loadStats();
       $('#statsOut').insertAdjacentHTML('afterbegin',
-       `<div class="warn" style="background:#eafaef;border-color:#bdebca;color:#1a7a37">✓ 已重摄入：卡片 ${d.cards} · findings ${d.findings} · 硬事实 ${d.hard_facts} · 量化 ${d.quant_facts} · 质疑 ${d.doubts} 条</div>`);}
+       `<div class="warn" style="background:#eafaef;border-color:#bdebca;color:#1a7a37">✓ 已重摄入：卡片 ${d.cards} · findings ${d.findings} · 硬事实 ${d.hard_facts} · 量化 ${d.quant_facts} · 观点 ${d.views||0} · 留痕 ${d.background||0} · 判重跳过 ${d.dup_skipped||0} · 质疑 ${d.doubts} 条</div>`);}
   }catch(e){alert('请求失败：'+e);}
   btn.disabled=false; btn.textContent='⟳ 重摄入 report_lab 卡片';
 }

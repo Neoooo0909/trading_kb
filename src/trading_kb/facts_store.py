@@ -346,21 +346,28 @@ class FactsStore:
         公告、A 级带质疑数为 0,两个功能在当前库上恒为空且不报错(2026-08-27 审核 F1)。
         有 idx_facts_doubt 时走部分索引(毫秒);没有则 LIKE 全扫降级(~15s,出声)。
         `+status` 禁用 status 索引(规划器坑,见 _search_fts)。"""
-        sev = self._SEV_CASE
-        if self.has_doubt_index():
-            where = "json_extract(extra,'$.doubt_severity') IS NOT NULL AND +status IN ('active','disputed')"
-        else:
-            self._warn_once("idx_facts_doubt 未建(跑 ./tkb migrate),质疑取数走全表扫描")
-            where = """extra LIKE '%"doubt_severity": "%' AND +status IN ('active','disputed')"""
-        args: list = []
+        extra_where, extra_args = "", []
         if categories:
-            where += f" AND +category IN ({','.join('?' * len(categories))})"
-            args += list(categories)
+            extra_where += f" AND +category IN ({','.join('?' * len(categories))})"
+            extra_args += list(categories)
         if code_only:
-            where += " AND (+canonical_id LIKE 'SH______' OR +canonical_id LIKE 'SZ______' OR +canonical_id LIKE 'BJ______')"
-        sql = (f"SELECT * FROM facts WHERE {where} ORDER BY {sev} DESC, support_count DESC LIMIT ?")
-        args.append(limit)
-        return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+            extra_where += (" AND (+canonical_id LIKE 'SH______' OR +canonical_id LIKE 'SZ______'"
+                            " OR +canonical_id LIKE 'BJ______')")
+        if self.has_doubt_index():
+            # 按严重度分三次等值点查(索引直接命中,不对 34 万行整体排序):生产实测整体 ORDER BY CASE 要
+            # 读全部带质疑行再 temp b-tree 排序 ~17s,分档等值 + LIMIT 只读需要的行。
+            out: list[dict] = []
+            for sev in ("high", "medium", "low"):
+                if len(out) >= limit:
+                    break
+                sql = ("SELECT * FROM facts WHERE json_extract(extra,'$.doubt_severity')=? "
+                       f"AND +status IN ('active','disputed'){extra_where} LIMIT ?")
+                out += [dict(r) for r in self.conn.execute(sql, [sev, *extra_args, limit - len(out)])]
+            return out
+        self._warn_once("idx_facts_doubt 未建(跑 ./tkb migrate),质疑取数走全表扫描")
+        where = """extra LIKE '%"doubt_severity": "%' AND +status IN ('active','disputed')""" + extra_where
+        sql = (f"SELECT * FROM facts WHERE {where} ORDER BY {self._SEV_CASE} DESC, support_count DESC LIMIT ?")
+        return [dict(r) for r in self.conn.execute(sql, [*extra_args, limit]).fetchall()]
 
     def count_with_doubts(self) -> int:
         if self.has_doubt_index():
@@ -905,7 +912,8 @@ class FactsStore:
     # ── 检索 ──────────────────────────────────────────────────────────────
     def query(self, canonical_id: Optional[str] = None, predicate: Optional[str] = None,
               include_invalidated: bool = False, limit: int = 100,
-              levels: Optional[list] = None, order: str = "level") -> list[dict]:
+              levels: Optional[list] = None, order: str = "level",
+              statuses: Optional[tuple] = None) -> list[dict]:
         """检索事实。默认只返 active/disputed;include_invalidated=True 返历史(§10.3 审计)。
 
         levels: 只取指定成色档(如 ["C","D"])。供 ask 候选池定向补录低成色观点——
@@ -925,7 +933,10 @@ class FactsStore:
         if levels:
             sql += f" AND evidence_level IN ({','.join('?' * len(levels))})"
             args += list(levels)
-        if not include_invalidated:
+        if statuses:                                   # 显式指定状态集(--audit 直取历史行)
+            sql += f" AND status IN ({','.join('?' * len(statuses))})"
+            args += list(statuses)
+        elif not include_invalidated:
             sql += " AND status IN ('active','disputed')"
         if order == "recent":
             # 时效序:valid_at 缺失排最后;同日多源在前
@@ -939,6 +950,11 @@ class FactsStore:
                     " support_count DESC LIMIT ?")
         args.append(limit)
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def count_by_status(self, canonical_id: str, statuses: tuple) -> int:
+        return int(self.conn.execute(
+            f"SELECT COUNT(*) FROM facts WHERE canonical_id=? AND status IN ({','.join('?' * len(statuses))})",
+            [canonical_id, *statuses]).fetchone()[0])
 
     def search(self, text: str, canonical_id: Optional[str] = None,
                include_invalidated: bool = False, limit: int = 400) -> list[dict]:

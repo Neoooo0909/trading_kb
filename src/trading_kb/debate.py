@@ -6,6 +6,7 @@ complete 可注入(测试用 mock，验证"空头确实看到多头、风控确�
 """
 from __future__ import annotations
 
+from . import config
 from . import llm as _llm
 
 _BULL = """你是多头研究员。基于下面带成色标签(A/B/C/D)的检索材料，列出 3-5 条最有力的看多论点，
@@ -59,12 +60,12 @@ def debate(query: str, engine, complete=None) -> dict:
     """
     complete = complete or _llm.complete
     material = engine.ask(query).to_six_section()
-    m = material[:6000]
+    m = material[:config.DEBATE_MATERIAL_CHARS]
     bull = complete(_BULL.format(query=query, material=m), max_tokens=1200,
                     tier="extract") or "(多头无输出)"
     bear = complete(_BEAR.format(query=query, material=m, bull=bull), max_tokens=1200,
                     tier="answer") or "(空头无输出)"
-    verdict = complete(_JUDGE.format(query=query, material=material[:5000], bull=bull, bear=bear),
+    verdict = complete(_JUDGE.format(query=query, material=material[:int(config.DEBATE_MATERIAL_CHARS * 0.8)], bull=bull, bear=bear),
                        max_tokens=1500, tier="answer") or "(裁决无输出)"
     return {"material": material, "bull": bull, "bear": bear, "verdict": verdict}
 

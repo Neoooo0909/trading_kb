@@ -26,8 +26,8 @@
 ```
 
 **规则**：
-1. 依赖只向下，同层之间尽量不互相依赖。**cli 与 web 之间禁止任何方向的 import**
-   （历史上 web→cli 借 `_TS_RE` 成环，已把碎片解析下沉到 `sentiment_lane.parse_fragments`）。
+1. 依赖只向下，同层之间尽量不互相依赖。**web 不得 import cli**（cli→web 的 `cmd_web` 懒加载允许，
+   无环）；历史上 web→cli 借 `_TS_RE` 成环，已把碎片解析下沉到 `sentiment_lane.parse_fragments`。
 2. 领域层保持纯函数、可离线复现；一切 I/O（网络/LLM/库）通过**构造注入的钩子**进入
    （ingest 的 verify/llm_classify/critique_engine，deep_ask/debate 的 complete）。
 3. 数据层的 `conn` 是私有实现。应用/服务层需要的查询一律加公共方法
@@ -79,6 +79,14 @@
 | 聊天碎片解析 | `sentiment_lane.parse_fragments()` | cli._read_fragments 与 web.feed_payload 各一份（含 _TS_RE） |
 | 订单事实状态机 | `ingest` 的 _ORDER_PROGRESSION（公告 lane 引用它，不再手抄键集） | announcements_to_kb._ORDER_FAMILY |
 | Fact 主键口径 | `models.Fact.fact_id`（sha1(dedup_key)[:16]） | scripts/clean_entities._reattribute 手抄（已加不变量测试钉住） |
+| 事实行合并口径 | `facts_store.merge_fact_rows()`（纯函数）+ `ensure_merged_archive/archive_fact_row` | dedup_same_claim.merge_rows / requalify._merge_into / _reattribute 各一份（2026-08-27 收敛；_reattribute 此前根本不合并、纯 DELETE） |
+| doc_claim remap | `FactsStore.doc_claim_remap_conn(conn, old, new)`（`UPDATE OR REPLACE`） | clean_entities / requalify / dedup 三份手抄裸 UPDATE（三元主键下会撞唯一约束） |
+| extra JSON 解析 | `facts_store.extra_of(row)` | ask/critique/deep_verify/web/dedup 各一套（两套对 `[1,2]` 会崩） |
+| 伪公司闸门 | `EntityRegistry.register`（company 且无 stock_code 且 `is_pseudo_company` → concept） | ingest.ingest_card 一处（kb_adapter/_ingest_cross_market/llm_attribute_unknown 绕过它，08-27 再生 91 个） |
+| 订单族键集 | `ingest._ORDER_PROGRESSION` | announcements_to_kb `_ORDER_FAMILY`（2026-08-27 改为引用，有测试） |
+| 成色档位表(前端) | `models.LEVEL_RANK` → `web._page()` 注入 JS `LEVELS` | web.py JS 手抄 LV/LVCLS/lvbar 三处 |
+| JSONL/行读取 | `trading_kb.jsonl.iter_lines/iter_jsonl`（只认 `\n`） | 4 个夜跑脚本 `read_text().splitlines()`（U+2028 切碎 JSON，历史坑 #9 复发） |
+| 治理脚本连接 | `scripts/_db.open_db`（busy_timeout=30000 + Row） | 8 处裸 `sqlite3.connect` |
 
 ### 2.4 SQLite 并发与备份策略
 
@@ -89,7 +97,9 @@
 - 备份轮转**只有一套政策**：`scripts/prune_backups.py`（日备成对保留 + 月度锚点永久 +
   ipo 备份留 2）。ZSXQ run_daily_extract.sh 里的 `ls -t | tail | rm` 旋转已删除——
   它曾把 6/7 月锚点和全部 ipo 备份误删。
-- schema 变更：目前无迁移机制，靠"新列必须兼容老库"纪律；中期计划见 §5。
+- schema 变更：`PRAGMA user_version`（当前 2）+ `FactsStore.migrate()`，**只由 `./tkb migrate` /
+  `docclaim build` 显式执行，绝不在打开库时做**（建索引/重建表在 190 万行库上要几十秒，并发进程会在
+  构造函数里等锁超时）。v2 = doc_claim 三元主键 + `idx_facts_doubt`。新列仍须兼容老库。
 
 ### 2.5 文件写入
 
@@ -113,9 +123,17 @@ facts.db      facts_fts + fts_map + fts_meta   FTS5 关键词索引(2-gram + bm2
                            索引文本 = claim+object+subject+extra.entities(2026-08-26 起,多实体可按次要实体名召回)
 facts.db      background_log   分流判 background 的 finding 原文留痕(2026-08-26 v3)：不进 FTS/向量、不参与检索，
                            只供审计与规则演进回填；此前 background 直接丢弃、无痕不可审计
-facts.db      doc_claim        (doc_id, ckey=blake2b(归一 claim), fact_id) 判重索引(2026-08-27)：同一来源文档同一句
-                           只能有一行——upsert 入口命中即返回旧行(superseded 也算存在、不复活；分挂不同证券码的
-                           刻意拆分例外)；插入/合并自动登记；改写 fact_id 的脚本必须 remap；`tkb docclaim build|status`
+facts.db      doc_claim        主键 (doc_id, ckey=blake2b(归一 claim), fact_id) 判重索引(2026-08-27；同日下午由二元主键迁移)：
+                           同一来源文档同一句视为同一事实——`find_doc_claim_dup` 唯一判定点(upsert 与 ingest 预检同调)，
+                           命中返回旧行(superseded 也算存在、不复活)；例外：已登记行与新事实都是证券码且互不相同
+                           (同句刻意拆到两只股票)则放行并登记。插入路径登记新 claim，合并路径登记新旧两个 claim
+                           (dedup_key 只看 claim[:80])；改写 fact_id 的脚本一律 `doc_claim_remap_conn`(UPDATE OR REPLACE)；
+                           `tkb docclaim build` = migrate + 清悬空 + 补登记(挂 run_daily_extract G 段)
+facts.db      idx_facts_doubt  部分表达式索引 json_extract(extra,'$.doubt_severity') IS NOT NULL(2026-08-27)：critique/deep-check
+                           用 `query_with_doubts` 分档等值点查；此前 query(limit=5000) 按成色截断在生产库上恒为 A 级、0 条带质疑，
+                           两个功能失效。索引建成后 extra 列获得 JSON 合法性硬约束(写 extra 的脚本必须 json.dumps)
+facts.db      facts_merged_archive  合并归档(loser 整行 + keeper 合并前整行)，dedup / _reattribute / requalify 共用
+facts.db      valid_at_backfill_log 卡片日期回填日志(`backfill_valid_at --undo <run_id>` 按它还原)
 facts.db      facts.ingested_at  入库时刻(2026-08-26 起首插写入，存量留空)：只做回溯与 valid_at≤ingested_at 校验，永不排序
 facts.db      facts.valid_at   经 dates.clean_date 闸口(ISO 日历合法、[2000, 明天])，否则置空=未知；研报卡日期来源见
                            extra.valid_at_source / 卡片 date_source(filename / zsxq_post / pdf_creation / pdf_mod)
@@ -135,8 +153,8 @@ view = 有非垃圾实体、无硬数字/硬谓词的定性论断(predicate HAS_
   绕过 FactsStore 的 raw-SQL 治理脚本会让索引漂移，靠日常 `tkb fts build` 对账兜底；
 - ask 快路径按实体覆盖度 + 短语型判定(FAST_PATH_MIN_FACTS / is_pseudo_company)；零/寡事实的真公司
   company: 仍会被 _locate_entity 锚到并切发现模式(出声)，这是设计行为不是 bug；
-- EntityRegistry.merge 不回写 facts/relations，事实侧靠治理脚本 _reattribute、关系侧靠
-  scripts/fix_relation_merged_refs.py 事后对账(2026-08-25 起)；
+- EntityRegistry.merge 不回写 facts（事实侧靠治理脚本 _reattribute）；relations 自 2026-08-27 起在 merge 内
+  `_sync_relations` 同步改指(并入重算 low_confidence)，fix_relation_merged_refs.py 只作存量对账；merge 拒自合并/成环；
 - ask._locate_entity 全量别名进 Python 匹配（17 万级，问答固定开销）。
 
 ---
@@ -149,7 +167,12 @@ launchd com.kbsync.daily (01:00)
        ├─ ZSXQ/ima 同步 → 抽取 → 语义索引
        ├─ run_announcements.sh → announcements_to_kb.py(昨日公告→A级) + ipo daily_run.py
        ├─ run_ir_qa.sh → ir_qa.py + ir_qa_to_kb.py(互动平台→A级)
-       └─ 实体治理(merge_*/clean_entities, dry-run 默认, 备份前置)
+       └─ run_daily_extract.sh(mkdir 原子锁；A 抽取 → 入库 ×3 → D 实体治理 merge_*/llm_attribute_unknown
+            → E semantic build → F fts build → G docclaim build；**每步接 rc，任一非零 exit 3**，
+            sync_all 的 run_step 对 --tail-only 段重试一次、仍失败记"需人工检查"——这是 §2.2 的本意)
+launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
+cli 退出码：0 = 成功/真没数据(critique/deep-check 空池)，2 = 故障或依赖缺失(feed-chat 文件不存在、add 抽卡失败、
+semantic 层不可用、migrate 建索引失败)；`main()` 透传子命令返回值。
 launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
 ```
 
@@ -163,6 +186,7 @@ launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
 1. **主键与语义解耦**：facts 换自增代理主键，dedup_key 保留 UNIQUE 独立演进；
    引入 `PRAGMA user_version` + migrations/ 目录，把 requalify 类脚本收编为编号迁移。
 2. ~~FTS5 替代 LIKE 全表扫~~(2026-08-25 已做)；别名定位改"query 提取候选子串→索引查询"。
+   ~~`PRAGMA user_version` + 显式迁移~~(2026-08-27 已做，见 §2.4)；requalify 类脚本收编为编号迁移仍待做。
 3. structure_store 与 facts_store 的乐观重试逻辑抽共享基类（当前同构复制已开始漂移）。
 4. 反证闭环（contradict）与 D 级升级闸（sentiment promote）目前是纸面功能，
    待接线时先补调用方设计。
@@ -172,6 +196,8 @@ launchd com.tkbprune.daily (12:00) → prune_backups.py(唯一轮转政策)
    company——实测它们绝大多数是真公司（数库科技/丸红/Cologix…，事实挂在别处），且 3,056 个被关系引用。
    另修 `scripts/fix_relation_merged_refs.py`：历史 merge 从不回写 relations，8,413 条边悬空指向旧 cid。
 5. web 内嵌 340 行 HTML/JS 拆独立资源文件；web 端 ask 补 auto_verify 与 CLI 对齐。
+6. 2026-08-27 全面审核登记未做项(docs/AUDIT_FIX_PLAN_20260827.md §4)：doc_claim 存量 59 条同 cid 异谓词重复的合并规则、
+   dedup 全表常驻内存改流式、retype 三库原子性、prune_orphan_relations TOCTOU、LLM 分流(收窄为"只升硬"后)是否保留默认开启的量化。
 
 ---
 
