@@ -30,12 +30,27 @@
 ④ 黑名单收窄(past performance 只认免责句式,删"评级的12个月");
 ⑤ relation_for 补英文映射(competitor 不再落成 BELONGS_TO_SEGMENT)。
 存量数据由 scripts/requalify_quant.py 按新规则重判迁移。
+
+── 2026-08-26 规则 v3:补"有主体定性论断"档 + 去数值路径年份门槛 ──────────────────
+起因:星球 7 月起 18 帖提到晓程科技,tkb 一条查不到——含晓程的 4 条 finding 全判 background 被丢。
+抽样 4 个 lane 5.3 万条 findings:社媒帖 60.4% 落 background,其中 95% 带实体;LLM 分档 400 条
+被丢的 finding,真背景仅 10%,60% 是带数字/事件的硬事实,27% 是有主体的定性论断。两个结构性缺口:
+  ① 第 4 组数值兜底要求正文自带年份(_YEAR_RE),而时间锚早已在卡片 date(Finding.source_date)里;
+     "硬数字无年份"占 background 20~30%,抽样 91 条 LLM 标 96% 硬事实——年份门槛没加精度只砍召回。
+  ② 四类里没有"有明确主体、无硬数字"的格子,"晓程科技拥有海外金矿资产,利润弹性突出"必然落兜底。
+修法(单调放宽,原判 hard/quant/structure 的判定与 id 全不变):
+  a) 数值兜底只看 _has_hard_number(百分比/金额),不再要求年份;
+  b) numbers 字段非空(剔纯日期值如 "9月"/"2026年")且有真实体 → hard_fact(抽样 86% 硬事实);
+  c) 新增 view:五组全不命中但有非垃圾实体 → view(入库可检索,成色降一档,不做结论头条);
+  d) 其余才是 background,ingest 改为写 background_log 留痕而非无痕丢弃。
+详见 docs/BACKGROUND_FIX_PLAN_20260826.md;存量回填 scripts/backfill_background.py。
 """
 from __future__ import annotations
 
 import re
 from typing import Optional
 
+from .entity_quality import is_garbage_entity
 from .models import Finding, Category, Relation
 
 # ── 关键词词典(规则核心)─────────────────────────────────────────────────
@@ -158,12 +173,37 @@ _YEAR_RE = re.compile(r"(20\d{2}[-/年]\d{1,2}|20\d{2}\s*年|\d{4}Q[1-4]|[一二
                       r"FY\d{2,4}|[1-4]Q\d{2}|Q[1-4]\s*20\d{2})", re.I)
 
 
+# v3:numbers 字段里的"纯日期值"(LLM 常把 "9月"/"2026年"/"Q3" 填进 numbers)不算可证伪数值,
+# 否则"预计 9 月发布"这类展望会被规则 b 收成硬事实——沿用 v2 "不用 f.numbers 兜底"的精度护栏思路,
+# 只放行带真实量值的 numbers。
+_DATEONLY_NUM_RE = re.compile(
+    r"^\s*(\d{1,2}\s*月|\d{4}\s*年?|20\d{2}[-/年.]\d{1,2}([-/月.]\d{1,2})?\s*[日号]?|"
+    r"Q[1-4]|[1-4]Q\d{2,4}|\d{1,2}\s*[日号]|[一二三四]季度|[上下]半年|\d+[-~至]\d+\s*月|"
+    r"\d+\s*个月|\d+\s*天|\d+\s*年|\d+[-\s]?days?|\d+H\d{2}|FY\d{2,4}|\d{4}E)\s*$", re.I)
+
+
+def _has_real_numbers(f: Finding) -> bool:
+    """numbers 字段是否含至少一个非纯日期的量值(v3 规则 b 的数值依据)。"""
+    for n in f.numbers or []:
+        v = str(n.get("value", "") if isinstance(n, dict) else n).strip()
+        if v and not _DATEONLY_NUM_RE.match(v):
+            return True
+    return False
+
+
+def _has_real_entity(f: Finding) -> bool:
+    """finding 是否带至少一个非垃圾实体(与 ingest._pick_subject 同口径,v3 view 档的主体依据)。"""
+    return any(isinstance(e, str) and e.strip() and not is_garbage_entity(e, "concept")
+               for e in (f.entities or []))
+
+
 def classify_finding(f: Finding, llm=None) -> Category:
     """对单条 finding 分类。llm 为可选复判钩子(签名 llm(finding)->Category)。
 
     判定顺序即优先级,不可随意调换(见模块 docstring 的精度护栏):
-      0 黑名单 → 1 量化 → 2 硬谓词(中/英) → 3 结构关系 → 4 财务/评级/数值 → 5 兜底
+      0 黑名单 → 1 量化 → 2 硬谓词(中/英) → 3 结构关系 → 4 财务/评级/数值 → 5 有主体定性(view) → 6 兜底
     结构关系必须排在第 4 组数值路径之前,否则带数字的产业链关系会被误收成 hard_fact。
+    v3(2026-08-26):第 4 组数值兜底不再要求年份;新增 view 档;见模块 docstring。
     """
     raw = f"{f.claim} {f.evidence}"
     text = raw.lower()
@@ -191,16 +231,24 @@ def classify_finding(f: Finding, llm=None) -> Category:
     elif ((_RATING_KW.search(raw) or _INSIDER_RE.search(raw))
           and (_has_hard_number(raw) or f.numbers)):
         cat = "hard_fact"
-    elif _has_hard_number(raw) and _YEAR_RE.search(raw):
+    # v3:硬数字(百分比/金额)本身即 96% 精度的可证伪标记,时间锚由 Fact.valid_at(卡片日期)承担,
+    # 不再要求正文自带年份(旧门槛把"净买入 5.88 亿美元""限额 20%"这类句子整批误杀)。
+    elif _has_hard_number(raw):
         cat = "hard_fact"
-    # 5) 其余为背景/定性
+    # v3 规则 b:numbers 字段含真实量值 + 有主体 → 可证伪(抽样 86% 硬事实)
+    elif _has_real_numbers(f) and _has_real_entity(f):
+        cat = "hard_fact"
+    # 5) v3:有明确主体的定性论断 → view(可检索、不做结论)
+    elif _has_real_entity(f):
+        cat = "view"
+    # 6) 其余为背景(无主体无数字的宏观/情绪复述、套话)→ ingest 写 background_log 留痕
     else:
         cat = "background"
 
     # LLM 复判(预留):仅在开启且规则给出低置信时介入
     if llm is not None:
         override = llm(f)
-        if override in ("hard_fact", "structure", "quant_fact", "background"):
+        if override in ("hard_fact", "structure", "quant_fact", "view", "background"):
             cat = override
     return cat
 

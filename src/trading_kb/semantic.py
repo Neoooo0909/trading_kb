@@ -272,15 +272,25 @@ class SemanticIndex:
                   file=sys.stderr)
             return False
 
-    def _save_matrix_cache(self) -> None:
+    def _save_matrix_cache(self, from_tmp: "Path | None" = None, rows: int = 0) -> None:
         """落盘:先写 .tmp 再 os.replace(两个进程同时保存也不会互相撕裂);ids 最后写,
-        读端先校指纹再校形状,半新半旧组合会被形状校验拒掉。失败只出声不阻断检索。"""
+        读端先校指纹再校形状,半新半旧组合会被形状校验拒掉。失败只出声不阻断检索。
+
+        from_tmp:_load_matrix 已把数据逐行写进该 .tmp 的 memmap(2026-08-26 省内存路径),
+        此处只需 flush + rename,再以只读 memmap 重挂 self._mat(不保留可写映射);
+        rows 为真实行数,少于分配行数时(有跳过/并发删除)需按 np.save 重写头部,故走全量落盘。"""
         mat_p, ids_p = self._cache_paths()
         try:
             tmp_m = Path(str(mat_p) + ".tmp")
-            with open(tmp_m, "wb") as fh:             # 用文件句柄:np.save 对非 .npy 名会自动加后缀
-                np.save(fh, np.ascontiguousarray(self._mat, dtype="float32"))
-            os.replace(tmp_m, mat_p)
+            if from_tmp is not None and rows and rows == getattr(self._mat, "shape", (0,))[0]:
+                self._mat.flush()                     # memmap 已就地写好,零额外内存
+                del self._mat
+                os.replace(from_tmp, mat_p)
+                self._mat = np.load(str(mat_p), mmap_mode="r")
+            else:
+                with open(tmp_m, "wb") as fh:         # 用文件句柄:np.save 对非 .npy 名会自动加后缀
+                    np.save(fh, np.ascontiguousarray(self._mat, dtype="float32"))
+                os.replace(tmp_m, mat_p)
             tmp_i = Path(str(ids_p) + ".tmp")
             tmp_i.write_text(json.dumps({"key": self._cache_key(), "ids": self._ids},
                                         ensure_ascii=False), encoding="utf-8")
@@ -299,20 +309,59 @@ class SemanticIndex:
         if self._load_matrix_cache():
             self._mat_ver = ver
             return
-        ids, vecs = [], []
-        for fid, blob in self._conn.execute("SELECT fact_id, vec FROM vectors"):
-            ids.append(fid)
-            vecs.append(np.frombuffer(blob, dtype="float32"))
-        if not vecs:
+        # 直接写盘 memmap 再逐行填充(2026-08-26):旧写法 list(全量) → vstack(全量) → m/norms(全量)
+        # 同时持有三份副本,190 万×512 float32 时峰值 ~11.6GB,8GB 机器必然换页(回填后必现)。
+        # 现在数据直接落到缓存文件的 memmap 上、逐行归一化,常驻内存只有页缓存(可被 OS 回收)。
+        n = int(self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0])
+        if not n:
             self._ids, self._mat, self._mat_ver = [], np.zeros((0, 1), dtype="float32"), ver
             return
-        m = np.vstack(vecs)
-        norms = np.linalg.norm(m, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        self._mat = m / norms
-        self._ids = ids
-        self._mat_ver = ver
-        self._save_matrix_cache()
+        dim = self.backend.dim
+        mat_p, ids_p = self._cache_paths()
+        tmp_m = Path(str(mat_p) + ".tmp")
+        ids: list = []
+        used_memmap = True
+        try:
+            arr = np.lib.format.open_memmap(tmp_m, mode="w+", dtype="float32", shape=(n, dim))
+        except Exception as e:                       # 无处可写(只读盘/权限)→ 退回内存单副本
+            print(f"[semantic] 矩阵缓存不可写,内存构建({type(e).__name__}: {e})", file=sys.stderr)
+            arr = np.empty((n, dim), dtype="float32")
+            used_memmap = False
+        i = 0
+        for fid, blob in self._conn.execute("SELECT fact_id, vec FROM vectors"):
+            if i >= n:                               # 并发新增:本轮只收指纹对应的前 n 条
+                break
+            v = np.frombuffer(blob, dtype="float32")
+            if v.shape[0] != dim:                    # 维度不符(换后端/半截 BLOB)→ 跳过,不污染矩阵
+                continue
+            nrm = float(np.linalg.norm(v)) or 1.0
+            arr[i] = v / nrm
+            ids.append(fid)
+            i += 1
+        if i < n and used_memmap:
+            # 真实行数少于预分配(维度不符被跳过/并发删除):.npy 头部行数必须与 ids 数一致,
+            # 否则读端形状校验永远拒收、每次 ask 都退回 BLOB 全量重建。按真实行数分块重写一份。
+            tmp2 = Path(str(mat_p) + ".tmp2")
+            try:
+                arr2 = np.lib.format.open_memmap(tmp2, mode="w+", dtype="float32", shape=(i, dim))
+                for s in range(0, i, 50000):
+                    e2 = min(s + 50000, i)           # 上界必须显式钳到 i:源 arr 有 n(>i) 行,
+                    arr2[s:e2] = arr[s:e2]           # 直接 s:s+50000 会取回 n 行、形状不匹配
+                arr2.flush()
+                del arr, arr2
+                tmp_m.unlink(missing_ok=True)
+                tmp_m = tmp2
+                arr = np.load(str(tmp_m), mmap_mode="r")
+            except Exception as e:
+                print(f"[semantic] 截断重写失败,内存兜底({type(e).__name__}: {e})", file=sys.stderr)
+                arr = np.array(arr[:i], dtype="float32")
+                used_memmap = False
+                tmp2.unlink(missing_ok=True)         # 别留半截 .tmp2
+                tmp_m.unlink(missing_ok=True)
+        elif i < n:
+            arr = arr[:i]
+        self._mat, self._ids, self._mat_ver = arr, ids, ver
+        self._save_matrix_cache(from_tmp=tmp_m if used_memmap else None, rows=i)
 
     def search(self, query: str, top_k: int = 120) -> list[str]:
         """语义召回 top-k fact_ids(召回字面不匹配但语义相关的事实)。

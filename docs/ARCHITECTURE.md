@@ -2,7 +2,10 @@
 
 > 2026-08-16 全面审查后确立。本文档是架构的**唯一权威描述**：分层规则、跨模块协议、
 > 单一定义点清单、并发与备份策略。改代码前先对照本文；违背本文的实现视为缺陷。
-> 变更前完整备份见 `.backup/pre_overhaul_20260816/`（代码 tar + 六库 sqlite3 .backup 热备）。
+> 变更前完整备份 `.backup/pre_overhaul_20260816/` **已于 2026-08-26 清理**（占 5.4G，其中 4.2G 是
+> 可由 `tkb semantic build` 重建的向量库；facts/entities 停在 8-16，其后经历补跑 3.5 万条事实、
+> FTS5 建表、伪实体改型、relations 修复，已不构成可用回滚点）。当前回滚点见 §备份策略：
+> `.backup/` 日更成对备份（`com.tkbprune.daily` 每天 12:00 轮转，保留 3 天 + 每月首份）。
 
 ---
 
@@ -106,9 +109,25 @@ vectors_bge.db vectors     语义向量(fact_id → BLOB)，与 facts 弱关联(
 vectors_bge.db.mat.npy / .ids.json   语义矩阵磁盘缓存(派生物，memmap 秒开；指纹=主文件 mtime/size+条数，
                            失配自动从 BLOB 重建；可随时删除，不进备份)
 facts.db      facts_fts + fts_map + fts_meta   FTS5 关键词索引(2-gram + bm25)：upsert 同事务写，
-                           `tkb fts build` 日常对账(补缺+清孤儿)；fts_meta.built 未置位时 search 走 LIKE 降级
+                           `tkb fts build` 日常对账(补缺+清孤儿)；fts_meta.built 未置位时 search 走 LIKE 降级；
+                           索引文本 = claim+object+subject+extra.entities(2026-08-26 起,多实体可按次要实体名召回)
+facts.db      background_log   分流判 background 的 finding 原文留痕(2026-08-26 v3)：不进 FTS/向量、不参与检索，
+                           只供审计与规则演进回填；此前 background 直接丢弃、无痕不可审计
+facts.db      doc_claim        (doc_id, ckey=blake2b(归一 claim), fact_id) 判重索引(2026-08-27)：同一来源文档同一句
+                           只能有一行——upsert 入口命中即返回旧行(superseded 也算存在、不复活；分挂不同证券码的
+                           刻意拆分例外)；插入/合并自动登记；改写 fact_id 的脚本必须 remap；`tkb docclaim build|status`
+facts.db      facts.ingested_at  入库时刻(2026-08-26 起首插写入，存量留空)：只做回溯与 valid_at≤ingested_at 校验，永不排序
+facts.db      facts.valid_at   经 dates.clean_date 闸口(ISO 日历合法、[2000, 明天])，否则置空=未知；研报卡日期来源见
+                           extra.valid_at_source / 卡片 date_source(filename / zsxq_post / pdf_creation / pdf_mod)
 hypotheses/H*.md           假设账本(纯文件)
 ```
+
+分流类别(classify.py，2026-08-26 v3)：hard_fact / quant_fact / structure / **view** / background。
+view = 有非垃圾实体、无硬数字/硬谓词的定性论断(predicate HAS_VIEW，成色=信源基线降一档，恒 unverifiable)，
+入 facts 可检索、进证据链与情绪面，但 ask 结论头条跳过它(`_top_conclusion`)。数值兜底不再要求正文自带年份
+(时间锚=卡片日期→valid_at)。规则单调放宽：原判 hard/quant/structure 的判定与 fact_id 不变，
+存量回填 `scripts/backfill_background.py` 按"fact_id 已存在即跳过"补齐此前被丢的部分(不走全量 re-ingest，
+因 upsert 合并路径会复活 superseded 行)。归因与方案：docs/BACKGROUND_FIX_PLAN_20260826.md。
 
 已知的结构性约束（当前接受、中期偿还）：
 - fact_id 是语义派生哈希 → predicate/主体一变 id 就变，规则演进需 requalify 手术；

@@ -70,8 +70,12 @@ def test_rating_基金仓位underweight仍会命中的已知残留():
 
 # ── ③ 裸年份边界 ─────────────────────────────────────────────────────────
 def test_year_金额与代码不当年份():
-    # 纯金额句:2000万 的"2000"不再当年份 → 无时间锚 → background
-    assert classify_finding(_f("拟使用自有资金2000万元购买理财产品")) == "background"
+    # 纯金额句:2000万 的"2000"不再当年份(_YEAR_RE 不命中)。
+    # v3(2026-08-26)起数值兜底不再要求年份——有金额即可证伪、时间锚由卡片日期承担 → hard_fact;
+    # 本断言改为只锁"2000 不被当成年份"这一点,分类结论随 v3 口径。
+    from trading_kb.classify import _YEAR_RE
+    assert not _YEAR_RE.search("拟使用自有资金2000万元购买理财产品")
+    assert classify_finding(_f("拟使用自有资金2000万元购买理财产品")) == "hard_fact"
     # 真年份仍可锚定(财务词+数值+年份)
     assert classify_finding(_f("Company revenue grew 15% in 2026")) == "hard_fact"
 

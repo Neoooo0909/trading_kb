@@ -120,7 +120,8 @@ def ingest_payload() -> dict:
     rep = run_ingest()
     return {"cards": rep.cards, "findings": rep.findings,
             "hard_facts": rep.hard_facts, "quant_facts": rep.quant_facts,
-            "structures": rep.structures, "entities": rep.entities_registered,
+            "structures": rep.structures, "views": rep.views,
+            "background": rep.background, "entities": rep.entities_registered,
             "level_dist": rep.level_dist, "doubts": rep.doubts,
             "doubt_high": rep.doubt_high}
 

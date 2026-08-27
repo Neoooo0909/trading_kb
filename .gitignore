@@ -23,3 +23,6 @@ venv/
 
 # 系统
 .DS_Store
+
+# 回填 fact_id 清单(13MB 数据派生物,回滚用,留本地)
+docs/background_fix_scratch/backfill_v3_fact_ids.txt

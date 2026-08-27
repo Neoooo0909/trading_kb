@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
 import json
 import re
 import sqlite3
@@ -16,7 +18,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .models import Fact, EvidenceLevel, LEVEL_RANK, content_grams
+from .dates import clean_date
+from .models import Fact, EvidenceLevel, LEVEL_RANK, content_grams, _normalize
 
 _WARNED: set = set()      # 进程内只出声一次的降级告警(§2.2 出声,但别刷屏)
 
@@ -26,6 +29,14 @@ _LEVEL_RANK = LEVEL_RANK   # 唯一定义点在 models.LEVEL_RANK;此别名兼�
 # 作为 LIKE 条件没有区分度、只会把 LIMIT 名额吃光。仅过滤自动切出的 gram,不影响完整词。
 _STOP_GRAMS = {"股份", "公司", "有限", "集团", "科技", "关于", "公告", "市场",
                "行业", "中国", "股东", "计划", "发展", "控股"}
+
+
+_CODE_RE = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+
+
+def _is_code(cid) -> bool:
+    """canonical_id 是否证券代码主体(SH/SZ/BJ + 6 位)。"""
+    return bool(cid) and bool(_CODE_RE.match(str(cid)))
 
 
 class FactsStore:
@@ -43,7 +54,122 @@ class FactsStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._fts_ok = False
         self._init_schema()
+        self._migrate_ingested_at()
+        self._init_doc_claim()
         self._init_fts()
+        self.last_upsert_dup = False   # 上一次 upsert 是否被 (doc, claim) 判重拦下(供入库回执计数)
+
+    # ── (doc_id, 归一 claim) 判重索引(2026-08-27,BACKGROUND_FIX_PLAN §6.2)────────
+    # 同一来源文档里同一句论断只能有一行。fact_id 随主体归一/规则演进而变,只按 dedup_key 判重
+    # 会让"文档再入库"(互动问答回补窗口、卡片改写后重入、重抽取)把已合并的重复慢慢造回来
+    # (08-26 dedup 后一夜回涨 48 行)。ckey = blake2b(归一 claim) 8 字节整数,省空间。
+    @staticmethod
+    def claim_key(claim: str) -> int:
+        """归一 claim → 64 位整数键(与 scripts/backfill_background._ckey 同口径)。"""
+        h = hashlib.blake2b(_normalize(claim or "").encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(h, "big", signed=True)
+
+    def _init_doc_claim(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS doc_claim (
+                doc_id  TEXT NOT NULL,
+                ckey    INTEGER NOT NULL,
+                fact_id TEXT NOT NULL,
+                PRIMARY KEY (doc_id, ckey)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_doc_claim_fid ON doc_claim(fact_id);
+            """
+        )
+
+    def doc_claim_register(self, fact_id: str, sources, claim: str) -> None:
+        """登记 (doc, claim) → fact_id;已有者不覆盖(先到先得,与 build 的 active 优先一致)。"""
+        ck = self.claim_key(claim)
+        self.conn.executemany("INSERT OR IGNORE INTO doc_claim(doc_id, ckey, fact_id) VALUES(?,?,?)",
+                              [(d, ck, fact_id) for d in (sources or []) if d])
+
+    def doc_claim_find(self, sources, claim: str):
+        """任一来源文档已登记同句 → 返回已存在行(任意状态,superseded 也算存在、不复活);否则 None。"""
+        ck = self.claim_key(claim)
+        for d in (sources or []):
+            if not d:
+                continue
+            r = self.conn.execute(
+                "SELECT f.* FROM doc_claim c JOIN facts f ON f.fact_id = c.fact_id "
+                "WHERE c.doc_id=? AND c.ckey=?", (d, ck)).fetchone()
+            if r is not None:
+                return r
+        return None
+
+    def doc_claim_remap(self, old_fact_id: str, new_fact_id: str) -> int:
+        """fact_id 改写/合并时同步改指(clean_entities._reattribute、requalify、dedup 用)。"""
+        return self.conn.execute("UPDATE doc_claim SET fact_id=? WHERE fact_id=?",
+                                 (new_fact_id, old_fact_id)).rowcount
+
+    def doc_claim_build(self, batch: int = 50000) -> dict:
+        """一次性/对账回填:两遍(active/disputed 先登记,其余后),INSERT OR IGNORE,幂等。
+
+        按 rowid 分页读、读完关游标再写:WAL 下若在打开的读快照期间别的连接提交了写,本连接再写就报
+        BUSY_SNAPSHOT("database is locked"),重试也无用——08-27 与日更 ingest 并行时踩过。"""
+        n = seen = 0
+        for cond in ("status IN ('active','disputed')", "status NOT IN ('active','disputed')"):
+            last = -1
+            while True:
+                page = self.conn.execute(
+                    f"SELECT rowid, fact_id, claim, sources FROM facts WHERE {cond} AND rowid > ? "
+                    f"ORDER BY rowid LIMIT ?", (last, batch)).fetchall()
+                if not page:
+                    break
+                last = page[-1]["rowid"]
+                seen += len(page)
+                rows = []
+                for r in page:
+                    try:
+                        srcs = json.loads(r["sources"] or "[]")
+                    except ValueError:
+                        srcs = []
+                    ck = self.claim_key(r["claim"])
+                    rows.extend((d, ck, r["fact_id"]) for d in srcs if d)
+                n += self._doc_claim_flush(rows)
+        total = self.conn.execute("SELECT COUNT(*) FROM doc_claim").fetchone()[0]
+        return {"facts_scanned": seen, "inserted": n, "doc_claim_rows": total}
+
+    def _doc_claim_flush(self, rows: list) -> int:
+        """分批落盘;与日更 ingest 同时跑时写锁可能超过 busy_timeout,锁冲突退避重试而非整跑失败。"""
+        import time as _time
+        before = self.conn.total_changes
+        for attempt in range(12):
+            try:
+                self.conn.executemany("INSERT OR IGNORE INTO doc_claim(doc_id, ckey, fact_id) VALUES(?,?,?)", rows)
+                self.conn.commit()
+                return self.conn.total_changes - before
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() or attempt == 11:
+                    raise
+                self.conn.rollback()
+                _time.sleep(5 * (attempt + 1))
+        return 0
+
+    def doc_claim_status(self) -> dict:
+        rows = self.conn.execute("SELECT COUNT(*) FROM doc_claim").fetchone()[0]
+        dangling = self.conn.execute(
+            "SELECT COUNT(*) FROM doc_claim c LEFT JOIN facts f ON f.fact_id=c.fact_id WHERE f.fact_id IS NULL"
+        ).fetchone()[0]
+        return {"rows": rows, "dangling": dangling}
+
+    def _migrate_ingested_at(self) -> None:
+        """2026-08-26:加 ingested_at(入库时刻,ISO 秒级)。只做回溯与 valid_at≤ingested_at 校验,
+        永不参与排序/时效加分。ADD COLUMN 常量默认值是元数据操作,2.5GB 库也秒级;多进程并发
+        同时迁移时后到者报 duplicate column,吞掉即可。存量行留 ''(=不知道)。"""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(facts)")}
+        if "ingested_at" in cols:
+            return
+        try:
+            self.conn.execute("ALTER TABLE facts ADD COLUMN ingested_at TEXT DEFAULT ''")
+            self.conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     def _init_schema(self) -> None:
         self.conn.executescript(
@@ -83,9 +209,84 @@ class FactsStore:
                 key   TEXT PRIMARY KEY,
                 value TEXT
             );
+            -- background 留痕表(2026-08-26 v3):分流判 background 的 finding 此前直接丢弃、无痕
+            -- 不可审计;现在原文落这里(不进 FTS/向量、不参与检索),供审计与日后规则演进回填。
+            -- 主键 = sha1(doc_id|claim),同一卡片同一论断幂等。
+            CREATE TABLE IF NOT EXISTS background_log (
+                log_id      TEXT PRIMARY KEY,
+                doc_id      TEXT,
+                claim       TEXT,
+                entities    TEXT,
+                source_date TEXT,
+                source_kind TEXT,
+                reason      TEXT,
+                logged_at   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_bglog_doc ON background_log(doc_id);
             """
         )
         self.conn.commit()
+
+    # ── background 留痕(v3)────────────────────────────────────────────────
+    def log_background(self, doc_id: str, claim: str, entities=None, source_date: str = "",
+                       source_kind: str = "", reason: str = "no_entity_no_number") -> str:
+        """记录一条被分流丢弃的 finding 原文(幂等,INSERT OR IGNORE)。返回 log_id。"""
+        import hashlib
+        from datetime import datetime
+        log_id = hashlib.sha1(f"{doc_id}|{claim}".encode("utf-8")).hexdigest()[:16]
+        self.conn.execute(
+            """INSERT OR IGNORE INTO background_log
+               (log_id,doc_id,claim,entities,source_date,source_kind,reason,logged_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (log_id, doc_id or "", claim or "",
+             json.dumps([e for e in (entities or []) if isinstance(e, str)], ensure_ascii=False),
+             source_date or "", source_kind or "", reason,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.conn.commit()
+        return log_id
+
+    def background_log_count(self) -> int:
+        return int(self.conn.execute("SELECT COUNT(*) FROM background_log").fetchone()[0])
+
+    def set_extra_entities(self, fact_id: str, entities: list) -> bool:
+        """P1 存量补录:把实体列表**并入** extra.entities 并改写 FTS 行(不改 id/主体)。
+        返回是否找到该事实。单条一事务;批量请用 set_extra_entities_many(2026-08-26:回填 research lane
+        每条一事务 + fsync 只有 ~20 条/s,批量后一事务 500 条)。"""
+        with self.conn:
+            return self._set_extra_entities_inner(fact_id, entities)
+
+    def set_extra_entities_many(self, items) -> int:
+        """批量版:items=[(fact_id, entities)],一个事务内逐条并入。返回找到并处理的条数。"""
+        n = 0
+        with self.conn:
+            for fid, ents in items:
+                if self._set_extra_entities_inner(fid, ents):
+                    n += 1
+        return n
+
+    def _set_extra_entities_inner(self, fact_id: str, entities: list) -> bool:
+        """(调用方事务内)并集写 extra.entities + FTS 改写;找不到返回 False。"""
+        row = self.conn.execute(
+            "SELECT claim, object, subject, extra FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
+        if row is None:
+            return False
+        try:
+            extra = json.loads(row["extra"] or "{}")
+        except (TypeError, ValueError):
+            extra = {}
+        # 并集而非整体替换(2026-08-26 审查 P2-5):同一事实可能被多张卡/多轮回填补录,后来者不能抹掉先前实体
+        ents = list(extra.get("entities") or [])
+        for e in entities:
+            if isinstance(e, str) and e.strip() and e not in ents:
+                ents.append(e)
+        if extra.get("entities") == ents:
+            return True
+        extra["entities"] = ents
+        self.conn.execute("UPDATE facts SET extra=? WHERE fact_id=?",
+                          (json.dumps(extra, ensure_ascii=False), fact_id))
+        self._fts_write(fact_id, row["claim"], row["object"], row["subject"], " ".join(ents))
+        return True
 
     # ── FTS5 关键词索引(P0-B,2026-08-25,docs/RECALL_FIX_PLAN_20260825.md)──────
     # 旧 search 是 LIKE 全表扫:"需求"这类高频 gram 单独命中 6 万行,ORDER BY rowid DESC
@@ -128,11 +329,25 @@ class FactsStore:
         self.conn.commit()
 
     @staticmethod
-    def _fts_grams(claim, obj, subj) -> str:
-        """索引文本:claim+object+subject 的 content_grams(与检索/冲突消解同一基元)空格连接。"""
-        return " ".join(sorted(content_grams(f"{claim or ''} {obj or ''} {subj or ''}")))
+    def _fts_grams(claim, obj, subj, entities: str = "") -> str:
+        """索引文本:claim+object+subject(+extra.entities 全部实体名,v3/P1)的 content_grams
+        (与检索/冲突消解同一基元)空格连接。实体名进索引是为了让"挂在浩通科技名下、
+        entities 里还有晓程科技"的多实体事实也能被"晓程"查到(主体只取首实体,其余此前全丢)。"""
+        return " ".join(sorted(content_grams(
+            f"{claim or ''} {obj or ''} {subj or ''} {entities or ''}")))
 
-    def _fts_write(self, fact_id: str, claim, obj, subj) -> None:
+    @staticmethod
+    def _entities_text(extra) -> str:
+        """从 extra(dict 或 JSON 串)取 entities 列表拼成文本;缺失/畸形返回空串。"""
+        try:
+            if isinstance(extra, str):
+                extra = json.loads(extra or "{}")
+            ents = (extra or {}).get("entities") or []
+            return " ".join(e for e in ents if isinstance(e, str))
+        except (TypeError, ValueError, AttributeError):
+            return ""
+
+    def _fts_write(self, fact_id: str, claim, obj, subj, entities: str = "") -> None:
         """(在调用方事务内)写/改写一条索引。同 fact_id 已有映射 → 先删旧 FTS 行再写。"""
         if not self._fts_ok:
             return
@@ -143,7 +358,7 @@ class FactsStore:
         else:
             rid = self.conn.execute("INSERT INTO fts_map(fact_id) VALUES(?)", (fact_id,)).lastrowid
         self.conn.execute("INSERT INTO facts_fts(rowid, grams) VALUES(?,?)",
-                          (rid, self._fts_grams(claim, obj, subj)))
+                          (rid, self._fts_grams(claim, obj, subj, entities)))
 
     @staticmethod
     def _fts_terms(text: str) -> list:
@@ -205,11 +420,12 @@ class FactsStore:
             for j in range(0, len(chunk), 500):
                 sub = chunk[j:j + 500]
                 rows += self.conn.execute(
-                    "SELECT fact_id, claim, object, subject FROM facts "
+                    "SELECT fact_id, claim, object, subject, extra FROM facts "
                     f"WHERE fact_id IN ({','.join('?' * len(sub))})", sub).fetchall()
             with self.conn:                    # 每批一个事务,写锁有界
                 for r in rows:
-                    self._fts_write(r["fact_id"], r["claim"], r["object"], r["subject"])
+                    self._fts_write(r["fact_id"], r["claim"], r["object"], r["subject"],
+                                    self._entities_text(r["extra"]))
             added += len(rows)
         if orphans:
             with self.conn:
@@ -237,6 +453,26 @@ class FactsStore:
         """
         if _depth > 3:
             raise sqlite3.OperationalError("facts.upsert 插入/删除竞态循环超过 3 层")
+        # 日期闸口(2026-08-26):`2026-84-17` 这类抽错的日期一律置空;否则合并路径 min() 会让
+        # 垃圾字符串赢过真日期。
+        fact.valid_at = clean_date(fact.valid_at)
+        self.last_upsert_dup = False
+        # (doc, claim) 判重(2026-08-27):同一文档同一句已有行 → 视为同一事实,不再按新 fact_id 插入。
+        # 例外:两行分别挂**不同**证券代码(同一句刻意拆到两只股票,dedup 也整组保留的那类)。
+        # 命中 superseded 行也算存在——不复活(与 backfill_background 口径一致)。
+        if _depth == 0:
+            same = self.doc_claim_find(fact.sources, fact.claim)
+            if same is not None and not (
+                    _is_code(same["canonical_id"]) and _is_code(fact.canonical_id)
+                    and same["canonical_id"] != fact.canonical_id):
+                self.last_upsert_dup = True
+                ents = (fact.extra or {}).get("entities") if isinstance(fact.extra, dict) else None
+                if ents and same["status"] in ("active", "disputed"):
+                    try:
+                        self.set_extra_entities(same["fact_id"], ents)
+                    except Exception:
+                        pass
+                return same["fact_id"]
         existing = self.conn.execute(
             "SELECT * FROM facts WHERE dedup_key=?", (fact.dedup_key,)
         ).fetchone()
@@ -244,25 +480,27 @@ class FactsStore:
         if existing is None:
             row = fact.to_row()
             row["unverifiable"] = int(fact.unverifiable)
+            row["ingested_at"] = _dt.datetime.now().isoformat(timespec="seconds")
             try:
                 self.conn.execute(
                     """INSERT INTO facts
                        (fact_id,dedup_key,subject,predicate,object,canonical_id,claim,status,
                         evidence_level,unverifiable,source_kind,support_count,sources,valid_at,
-                        invalid_at,supersedes,relation_id,category,extra)
+                        invalid_at,supersedes,relation_id,category,extra,ingested_at)
                        VALUES
                        (:fact_id,:dedup_key,:subject,:predicate,:object,:canonical_id,:claim,:status,
                         :evidence_level,:unverifiable,:source_kind,:support_count,:sources,:valid_at,
-                        :invalid_at,:supersedes,:relation_id,:category,:extra)""",
+                        :invalid_at,:supersedes,:relation_id,:category,:extra,:ingested_at)""",
                     row,
                 )
                 # 同事务写 FTS 索引(P0-B);索引写失败只出声,绝不让事实本身落库失败
                 # (漂移由 fts_build 日常对账兜底)。
                 try:
                     self._fts_write(fact.fact_id, row.get("claim"), row.get("object"),
-                                    row.get("subject"))
+                                    row.get("subject"), self._entities_text(fact.extra))
                 except sqlite3.OperationalError as e:
                     self._warn_once(f"FTS 索引写入失败,待 fts build 对账({e})")
+                self.doc_claim_register(fact.fact_id, fact.sources, fact.claim)
                 self.conn.commit()
                 return fact.fact_id
             except sqlite3.IntegrityError:
@@ -310,6 +548,8 @@ class FactsStore:
                     (new_sources_json, support, best_level, unver, valid_at,
                      fact.dedup_key, old_sources_json),
                 )
+            if cur.rowcount:
+                self.doc_claim_register(existing["fact_id"], fact.sources, existing["claim"])
             self.conn.commit()
             if cur.rowcount:
                 return existing["fact_id"]

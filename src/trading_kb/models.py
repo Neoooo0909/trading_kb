@@ -14,7 +14,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Literal, Optional
 
 # ── 分类类别(分流器输出,§7.3 + 量化扩展)────────────────────────────────
-Category = Literal["hard_fact", "structure", "quant_fact", "background"]
+# view(2026-08-26 v3 加):有明确主体、但无硬数字/硬谓词的定性投研论断("X 拥有海外金矿资产,
+# 利润弹性突出")。此前四类里没有这一格,这类句子只能落 background 被丢;实测被丢的 finding 里
+# 真背景仅 10%(docs/BACKGROUND_FIX_PLAN_20260826.md §2)。view 入 facts 可检索,但不做结论头条。
+Category = Literal["hard_fact", "structure", "quant_fact", "view", "background"]
 
 # ── 成色等级(§19)────────────────────────────────────────────────────────
 EvidenceLevel = Literal["A", "B+", "B", "C", "D"]
@@ -23,6 +26,17 @@ EvidenceLevel = Literal["A", "B+", "B", "C", "D"]
 # facts_store 的 SQL CASE、hypothesis 置信度、web 前端展示全部从这里派生;
 # 新增档位只改这里(web 前端 JS 的 LV 映射需同步,见 web.py 注释)。
 LEVEL_RANK: dict[str, int] = {"D": 0, "C": 1, "B": 2, "B+": 3, "A": 4}
+
+
+def level_down(level: str) -> str:
+    """成色降一档(D 封底):view 类定性论断的可靠性低于同源硬事实,按信源基线再降一档
+    (broker B→C、foreign_ib B+→B、social C→D)。从 LEVEL_RANK 派生,加档位自动跟随。"""
+    rank = LEVEL_RANK.get(level, 1)
+    target = max(rank - 1, 0)
+    for name, r in LEVEL_RANK.items():
+        if r == target:
+            return name
+    return "D"
 
 # ── 事实状态(§18/§10.3 双时态生命周期)──────────────────────────────────
 FactStatus = Literal["active", "superseded", "invalidated", "expired", "disputed"]

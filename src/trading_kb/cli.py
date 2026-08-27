@@ -27,7 +27,7 @@ def cmd_ingest(args) -> None:
     print("=== 摄入回执(研报重 lane)===")
     print(f"卡片 {rep.cards} | findings {rep.findings} | 实体登记 {rep.entities_registered}")
     print(f"硬事实 {rep.hard_facts} | 量化事实 {rep.quant_facts} | "
-          f"结构关系 {rep.structures} | 背景(跳过) {rep.background}")
+          f"结构关系 {rep.structures} | 定性论断(view) {rep.views} | 背景(留痕) {rep.background}")
     print(f"成色分布 {rep.level_dist}")
     print(f"质疑标记 {rep.doubts} 条(其中高严重度 {rep.doubt_high} 条)→ 用 `./tkb critique` 看清单")
 
@@ -345,6 +345,20 @@ def cmd_deep(args) -> None:
     reg.close(); facts.close(); structure.close()
 
 
+def cmd_docclaim(args) -> None:
+    """(doc, claim) 判重索引:build 全量/对账回填(幂等) / status 看规模与悬空。"""
+    facts = FactsStore(config.FACTS_DB)
+    if args.action == "status":
+        st = facts.doc_claim_status()
+        print(f"doc_claim 行数 {st['rows']} | 指向不存在事实(悬空) {st['dangling']}")
+        if st["dangling"]:
+            print("  ⚠ 有悬空:fact_id 被脚本改写却未 remap,跑 `./tkb docclaim build` 后再查。")
+    else:
+        print("▶ 回填 doc_claim(全表扫描,active 优先登记,幂等)…")
+        r = facts.doc_claim_build()
+        print(f"✓ 扫描 {r['facts_scanned']} 条事实,新登记 {r['inserted']} 条,索引共 {r['doc_claim_rows']} 条")
+
+
 def cmd_fts(args) -> None:
     """FTS5 关键词索引(2026-08-25):build 对账(补缺+清孤儿,首建全量约 1 分钟)/ status 看覆盖。"""
     config.ensure_data_dir()
@@ -509,6 +523,9 @@ def main(argv=None) -> int:
                      help="强制后端(默认自动择优:bge>model2vec)")
     psm.set_defaults(func=cmd_semantic)
 
+    pdc = sub.add_parser("docclaim", help="(doc,claim) 判重索引:build 全量/对账回填 / status")
+    pdc.add_argument("action", choices=["build", "status"])
+    pdc.set_defaults(func=cmd_docclaim)
     pft = sub.add_parser("fts", help="关键词索引(FTS5+BM25):build 对账补建 / status 看覆盖")
     pft.add_argument("action", choices=["build", "status"])
     pft.set_defaults(func=cmd_fts)

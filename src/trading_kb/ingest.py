@@ -1,7 +1,9 @@
 """研报重 lane 摄入编排(§9 摄入管线)。
 
 read report_lab cards → 分流 → 双轨成色 → 实体归一 → 入图(去重合并)。
-hard_fact/quant_fact → facts_store;structure → structure_store;background → 跳过(留原文)。
+hard_fact/quant_fact/view → facts_store;structure → structure_store;
+background → facts_store.background_log 留痕(v3,2026-08-26;此前是直接 return 无痕丢弃,
+"留原文"只写在注释里从未实现,六到七成 findings 消失且不可审计,见 docs/BACKGROUND_FIX_PLAN_20260826.md)。
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from .entity_quality import attribute_subject, is_garbage_entity, is_ib_firm, is
 from .entity_registry import EntityRegistry
 from .facts_store import FactsStore
 from .grade import grade_fact
-from .models import Fact, Finding, Relation, _normalize, content_grams
+from .models import Fact, Finding, Relation, _normalize, content_grams, level_down
 from .report_lab_adapter import card_entities, card_to_findings, iter_cards
 from .structure_store import StructureStore
 from .verify_hooks import make_verifier
@@ -40,7 +42,9 @@ class IngestReport:
     hard_facts: int = 0
     quant_facts: int = 0
     structures: int = 0
-    background: int = 0
+    views: int = 0            # v3:有主体定性论断(入库、可检索、不做结论)
+    background: int = 0       # 无主体无数字 → background_log 留痕(不入 facts)
+    dup_skipped: int = 0      # (doc, claim) 判重拦下的再入库(2026-08-27)
     entities_registered: int = 0
     level_dist: dict = None
     doubts: int = 0           # 带质疑标记的事实数
@@ -80,25 +84,36 @@ class ResearchIngestor:
         cat = classify_finding(f, llm=self.llm_classify)
 
         if cat == "background":
+            # v3:留痕而非无痕丢弃——"不该要"与"没判对"必须事后可区分(同 _util.read_jsonl
+            # 静默吞行的教训)。不进 FTS/向量,不参与检索。
             report.background += 1
+            self.facts.log_background(f.doc_id, f.claim, f.entities, f.source_date,
+                                      f.source_kind, reason="no_entity_no_number")
             return
 
         if cat == "structure":
-            self._ingest_structure(f, report, card_entity_names or [])
+            self._ingest_structure(f, report, card_entity_names or [],
+                                   code_map=code_map or {}, card=card)
             return
 
-        # hard_fact / quant_fact → facts_store
+        # hard_fact / quant_fact / view → facts_store
         self._ingest_fact(f, cat, report, code_map or {}, card=card)
 
     def _ingest_fact(self, f: Finding, cat: str, report: IngestReport,
                      code_map: dict, card: dict | None = None) -> None:
-        """硬事实/量化事实入时序事实层。"""
+        """硬事实/量化事实/定性论断(view)入时序事实层。"""
         if cat == "quant_fact":
             predicate = "HAS_FACTOR_PERFORMANCE"
+        elif cat == "view":
+            predicate = "HAS_VIEW"        # 不在 _ORDER_PROGRESSION/VERIFIABLE/_CONTRADICTING 内
         else:
             predicate = predicate_for(f)
 
         level, unver = grade_fact(f, predicate, verify=self.verify)
+        if cat == "view":
+            # 定性论断可靠性低于同源硬事实:信源基线降一档(broker B→C、social C→D),
+            # 恒 unverifiable。C/D 会被 ask._low_grade_views 收进"情绪面·不同观点"段。
+            level, unver = level_down(level), True
 
         # 主语取首个实体,优先用卡片级 code 锚定真实证券代码(N6)
         # A3:不再因 cat==hard_fact 就强制 stock(避免"上交所/监管机构"被错挂股票);
@@ -128,14 +143,24 @@ class ResearchIngestor:
             sources=[f.doc_id], valid_at=f.source_date, category=cat,
             extra={"evidence": f.evidence[:200], "page": f.page,
                    "verified_numbers": f.verified_numbers, "broker": f.broker,
-                   "doubts": doubts, "doubt_severity": max_sev},
+                   "doubts": doubts, "doubt_severity": max_sev,
+                   # P1(2026-08-26):完整实体列表随事实落库并进 FTS——主体只取首实体,
+                   # 其余实体此前全丢(抽样 46% 的 finding 有 ≥2 实体)。不放大 fact 数、不动主体归属。
+                   "entities": [e for e in (f.entities or [])
+                                if isinstance(e, str) and e.strip()],
+                   "rule_version": "v3"},
         )
         new_id = self.facts.upsert(fact)
+        if self.facts.last_upsert_dup:          # 同文同句已有行:不计新事实、不做冲突消解/质疑
+            report.dup_skipped += 1
+            return
 
         # 自动状态机:硬事实做冲突检测(进展替代 / 矛盾置争议),§10.3 四类结局
         if cat == "hard_fact":
             self._resolve_conflicts(fact, new_id)
             report.hard_facts += 1
+        elif cat == "view":
+            report.views += 1
         else:
             report.quant_facts += 1
         report.level_dist[level] = report.level_dist.get(level, 0) + 1
@@ -146,10 +171,17 @@ class ResearchIngestor:
         - 订单进展(传闻→意向→确认→交付):新更强 + 不更旧 → supersede 旧。
         - 矛盾/澄清类:对同主体既有事实标 disputed。
         默认保守:仅在主体(canonical_id)相同且对象有 token 重叠时动作,避免误伤。
+
+        性能(2026-08-26):下方两种动作都要求新事实谓词 ∈ 订单进展族 或 反证族,其他谓词
+        (HAS_CATALYST/FORECAST/FINANCIAL_METRIC/RATING/VIEW,占新事实绝大多数)进来只会白读——
+        而 query 按 canonical_id 拉 200 条要先把该主体全部行读出来排序,"未知主体"10.7 万行一次 5.1s、
+        英伟达 1.3 万行 1.8s,回填 research lane 因此 8 分钟走不完 500 张卡。先按谓词早退,语义不变。
         """
+        new_strength = _ORDER_PROGRESSION.get(new_fact.predicate)
+        if new_strength is None and new_fact.predicate not in _CONTRADICTING:
+            return
         existing = self.facts.query(canonical_id=new_fact.canonical_id,
                                     include_invalidated=False, limit=200)
-        new_strength = _ORDER_PROGRESSION.get(new_fact.predicate)
         for e in existing:
             if e["fact_id"] == new_id:
                 continue
@@ -165,8 +197,11 @@ class ResearchIngestor:
                 self.facts.mark_disputed(e["fact_id"])
 
     def _ingest_structure(self, f: Finding, report: IngestReport,
-                          card_entity_names: list[str]) -> None:
-        """结构关系入结构层。两端实体:优先 finding 内,不足时从卡片级实体补(C3)。"""
+                          card_entity_names: list[str],
+                          code_map: dict | None = None, card: dict | None = None) -> None:
+        """结构关系入结构层。两端实体:优先 finding 内,不足时从卡片级实体补(C3)。
+        不足两端 / 两端同一实体时不强造边——v3 起改走 view 入 facts(有主体即可检索),
+        此前是计入 background 后丢弃;仍无任何实体的才留痕。"""
         rel_type = relation_for(f) or "BELONGS_TO_SEGMENT"
         ents = list(dict.fromkeys(f.entities))   # 去重保序
         if len(ents) < 2:
@@ -177,18 +212,35 @@ class ResearchIngestor:
                     ents.append(name)
                 if len(ents) >= 2:
                     break
+        # 垃圾端点不建边(2026-08-27):"海外市场""美伊停火""上游"这类被 is_garbage_entity 拦在实体表
+        # 之外的名字,此前仍会 resolve 出 concept:/company: id 挂成边 → 135 条端点不存在的孤儿边。
+        # 剔掉后不足两端走 view/留痕,与"不强造边"的口径一致。
+        garbage = [e for e in ents if is_garbage_entity(e, "concept")]
+        if garbage:
+            ents = [e for e in ents if e not in garbage]
         if len(ents) < 2:
-            report.background += 1   # 仍不足两端,不强造边
+            self._structure_fallback(f, report, code_map, card,
+                                     "structure_garbage_end" if garbage else "structure_lt2")
             return
         src = self.registry.resolve(ents[0])
         dst = self.registry.resolve(ents[1])
         if src == dst:
-            report.background += 1
+            self._structure_fallback(f, report, code_map, card, "structure_same_ends")
             return
         self.structure.upsert(Relation(
             src=src, rel_type=rel_type, dst=dst, sources=[f.doc_id],
         ))
         report.structures += 1
+
+    def _structure_fallback(self, f: Finding, report: IngestReport, code_map, card,
+                            reason: str) -> None:
+        """结构边造不出来时的去向:有实体 → view 入 facts;无实体 → background_log。"""
+        if any(isinstance(e, str) and e.strip() for e in (f.entities or [])):
+            self._ingest_fact(f, "view", report, code_map or {}, card=card)
+        else:
+            report.background += 1
+            self.facts.log_background(f.doc_id, f.claim, f.entities, f.source_date,
+                                      f.source_kind, reason=reason)
 
     def ingest_card(self, card: dict, report: IngestReport) -> None:
         """摄入一张卡片:先登记卡片级实体(含 code),再摄入 findings。"""

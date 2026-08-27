@@ -41,7 +41,7 @@ class AskResult:
         lines.append("## 结论")
         active = [f for f in self.facts if f["status"] == "active"]
         if active:
-            top = active[0]
+            top = _top_conclusion(active)
             tag = _grade_tag(top)
             lines.append(f"{top['claim']} {tag}")
         else:
@@ -166,7 +166,7 @@ class AskResult:
             "synthesis": None,
         }
         if active:
-            top = active[0]
+            top = _top_conclusion(active)
             out["conclusion"] = {
                 "claim": top["claim"], "level": top["evidence_level"],
                 "unverifiable": bool(top["unverifiable"]),
@@ -341,11 +341,18 @@ class AskEngine:
             # 查"臻宝科技"混进胜宏科技(cid=concept:胜宏科技,共享"科技")。不限 cid 类型:概念/关系事实
             # (cid=concept:英伟达,正文含"精智达")因正文点名A而保留;纯 gram 碰撞噪音(正文无A)被清。
             # 仅证券查询触发(ent_aliases 仅证券非空);非证券/发现型查询走语义,不做此过滤。
+            # P1(2026-08-26):extra.entities 是该事实点名的全部实体(主体只取首实体,其余此前全丢);
+            # 它参与字面覆盖率与别名过滤,让"挂在浩通科技名下、entities 含晓程科技"的事实查晓程时进得了池。
+            ents_text = " ".join(_fact_extra(f).get("entities") or [])
             if ent_aliases and not ent_hit:
-                ftext = _normalize(f"{f.get('claim','')}{f.get('object','')}{f.get('subject','')}")
+                ftext = _normalize(f"{f.get('claim','')}{f.get('object','')}"
+                                   f"{f.get('subject','')}{ents_text}")
                 if not any(a in ftext for a in ent_aliases):
                     continue
-            fg = _content_grams(f"{f.get('claim','')} {f.get('object','')}")
+                # 次要实体点名 A → 半个实体命中:比纯 gram 碰撞强,比自有事实弱。
+                if ents_text and any(a in _normalize(ents_text) for a in ent_aliases):
+                    ent_hit = 0.5
+            fg = _content_grams(f"{f.get('claim','')} {f.get('object','')} {ents_text}")
             rel = len(qg & fg) / nq                         # 字面覆盖率 0~1(归一防长 claim 压垮语义)
             sscore = sem.get(f.get("fact_id"), 0.0)
             relevance = 1.5 * rel + 2.0 * ent_hit + 2.0 * sscore   # 字面/实体/语义同量纲可比
@@ -527,6 +534,24 @@ def _low_grade_views(active: list[dict]) -> list[dict]:
         seen.add(key)
         out.append(f)
     return out
+
+
+def _fact_extra(f: dict) -> dict:
+    """事实行的 extra JSON → dict(畸形/缺失返回 {});模块级,供 _rank_facts 等用。"""
+    import json as _json
+    try:
+        return _json.loads(f.get("extra") or "{}") or {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _top_conclusion(active: list) -> dict:
+    """结论头条:取排序首个**非 view** 的事实(v3,2026-08-26)。view 是有主体的定性论断,
+    可进证据链/情绪面,但不冒充结论;全是 view 时才退回 active[0]。"""
+    for f in active:
+        if f.get("category") != "view":
+            return f
+    return active[0]
 
 
 def _grade_tag(f: dict) -> str:

@@ -111,16 +111,97 @@ class EntityRegistry:
             "SELECT alias_norm, canonical_id FROM aliases WHERE LENGTH(alias_norm)=?", (n,)
         ).fetchall()
 
-    def merge(self, from_id: str, into_id: str) -> None:
+    def merge(self, from_id: str, into_id: str, sync_relations: bool = True) -> None:
         """事后合并:from_id 标记 merged_into into_id,别名改指 into_id(§17 F5)。
 
         边界警示:本方法只改注册表,**不改 facts 表的 canonical_id**——事实侧的
         重挂由治理脚本(scripts/clean_entities._reattribute)完成,两步不是原子的。
         两条 UPDATE 共享 python sqlite3 的隐式事务,commit 一次原子生效。
+
+        但 structure.relations 的 src/dst **必须在这里同步改指**(sync_relations=True):
+        关系边不改指的后果不是"噪声"而是【静默丢失】——边上还写着旧 cid,
+        `structure.neighbors(新 cid)` 查不到它,而旧 cid 已被 resolve() 解析成新 cid
+        也查不到,两头都够不着。2026-08-25 曾一次性修过 8,413 条(fix_relation_merged_refs.py),
+        但那是手工补丁没堵住入口,一天多后又攒了 47 条。闸口放在这里才覆盖全部
+        调用方(merge_fragments / merge_typo_fragments / merge_concept_companies /
+        merge_english_fragments,以及将来任何新增的合并脚本)。
         """
         self.conn.execute("UPDATE entities SET merged_into=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.execute("UPDATE aliases SET canonical_id=? WHERE canonical_id=?", (into_id, from_id))
         self.conn.commit()
+        if sync_relations:
+            self._sync_relations(from_id, into_id)
+
+    def _sync_relations(self, from_id: str, into_id: str) -> int:
+        """把 structure.relations 里指向 from_id 的边改指到 into_id(的合并终点)。返回改动条数。
+
+        跨库(entities.db / structure.db)无法与上面的 UPDATE 同事务;这里的取舍是
+        **失败不阻断 merge**——注册表已提交,关系没改指最坏退回到"改前状态"(即历史现状),
+        而抛异常会让调用方以为整个 merge 失败、重跑时注册表已是合并态,更难收拾。
+
+        rel_id 与 models.Relation.rel_id 同口径(sha1(归一src|type|归一dst)[:16]),
+        改指后必须重算:碰上已存在的同 id 边则并入(sources 取并集、support_count 跟随),
+        改指后 src==dst 的自环直接删。
+
+        ⚠ from_id 端**直接映射到 into_id**,不走 _follow_merge 查表:上面那条
+        `UPDATE entities … WHERE canonical_id=from_id` 在 from_id 未登记时影响 0 行,
+        此时 _follow_merge(from_id) 原样返回 from_id,改指会静默失效。合并的目标由
+        调用方给定,不该反过来依赖注册表是否已有该行。另一端仍走 _follow_merge
+        (它可能早被合并过,要跟到终点)。
+        """
+        import hashlib
+        import json
+
+        # 三个库同目录(见 config:FACTS_DB/STRUCTURE_DB/ENTITY_DB 共用 DATA_DIR)。
+        # 从自身路径推导而非 import config,测试传临时 db_path 时也能对上。
+        structure_path = self.db_path.parent / "structure.db"
+        if not structure_path.exists():
+            return 0                      # 没有结构层(如纯注册表测试)→ no-op
+        sc = None
+        try:
+            sc = sqlite3.connect(str(structure_path), timeout=30)
+            sc.row_factory = sqlite3.Row
+            sc.execute("PRAGMA busy_timeout=30000")   # kbsync 可能正在写 structure.db
+            rows = sc.execute(
+                "SELECT * FROM relations WHERE src=? OR dst=?", (from_id, from_id)
+            ).fetchall()
+            if not rows:
+                return 0                  # 绝大多数 merge 走这里:两个索引点查,成本可忽略
+            target = self._follow_merge(into_id)
+
+            def _to(cid: str) -> str:
+                return target if cid == from_id else self._follow_merge(cid)
+
+            changed = 0
+            for r in rows:
+                src, dst = _to(r["src"]), _to(r["dst"])
+                if src == dst:                                   # 合并后自环 → 删
+                    sc.execute("DELETE FROM relations WHERE rel_id=?", (r["rel_id"],))
+                    changed += 1
+                    continue
+                key = f"{_normalize(src)}|{r['rel_type']}|{_normalize(dst)}"
+                rid = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+                if rid == r["rel_id"]:
+                    sc.execute("UPDATE relations SET src=?, dst=? WHERE rel_id=?", (src, dst, rid))
+                elif sc.execute("SELECT 1 FROM relations WHERE rel_id=?", (rid,)).fetchone():
+                    ex = sc.execute("SELECT sources FROM relations WHERE rel_id=?", (rid,)).fetchone()
+                    srcs = sorted(set(json.loads(ex["sources"] or "[]")
+                                      + json.loads(r["sources"] or "[]")))
+                    sc.execute("UPDATE relations SET sources=?, support_count=? WHERE rel_id=?",
+                               (json.dumps(srcs, ensure_ascii=False), len(srcs) or 1, rid))
+                    sc.execute("DELETE FROM relations WHERE rel_id=?", (r["rel_id"],))
+                else:
+                    sc.execute("UPDATE relations SET rel_id=?, src=?, dst=? WHERE rel_id=?",
+                               (rid, src, dst, r["rel_id"]))
+                changed += 1
+            sc.commit()
+            return changed
+        except sqlite3.Error as exc:
+            print(f"⚠ merge({from_id}) 关系改指失败(注册表已提交,关系维持原状): {exc}")
+            return 0
+        finally:
+            if sc is not None:
+                sc.close()
 
     # ── 解析 ──────────────────────────────────────────────────────────────
     def resolve(self, name: str, type_: str = "concept",

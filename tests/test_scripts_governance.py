@@ -158,3 +158,46 @@ def test_parse_fragments_shared_impl():
     assert frags == [("绿的谐波要起飞", "2026-06-10 09:30"),
                      ("宁德时代利空", "2026-06-11"),
                      ("没有时间戳的一条", "")]
+
+
+# ── ④ _best_cid 的三种归宿（phase_apply 计数器的契约）─────────────────────
+def test_best_cid_outcomes_are_distinguishable(tmp_path):
+    """`phase_apply` 按 `_best_cid` 的返回值把跳过分成三类计数，这里钉住那三种返回。
+
+    背景（2026-08-24）：原来三种成因合成一个 `miss`，日志打「可解析回填 0 |
+    无法解析跳过 50205」，读起来像解析器全线失灵；拆开才看到是 50,056 事实已不在库
+    + 149 精度 bail + 0 真失败。计数器要可信，就得让 `_best_cid` 的返回值保持可区分：
+      · 卡内多个"不同身份"实体子串命中主体 → **空串**（精度 bail，绝不猜）
+      · 命中单一实体 / 卡内无实体行       → 非空 cid
+    若哪天把 bail 改成返回 None 或占位 cid，bail 计数会静默串到别的桶里去。
+    """
+    from llm_attribute_unknown import _best_cid
+    from trading_kb.entity_registry import EntityRegistry
+
+    reg = EntityRegistry(tmp_path / "entities.db")
+
+    # ① 歧义：母公司与上市子公司同时在卡内、都子串命中主体 → 必须 bail 成空串。
+    #    注意子串判据自带 len>=3 守卫，主体太短（如"生益"）压根进不了候选池，
+    #    那是"无候选"而非"歧义"，走的是另一条路。
+    ambiguous = {"entities": [{"name": "中芯国际集成电路制造", "kind": "stock", "code": "688981"},
+                              {"name": "中芯国际控股", "kind": "company"}]}
+    cid, _ = _best_cid(reg, "中芯国际", ambiguous, write=False)
+    assert cid == "", "多实体身份歧义必须返回空串（精度 bail），不能猜首个"
+
+    # ② 精确命中：唯一实体 → 必须给出非空 cid，且不带未知主体
+    exact = {"entities": [{"name": "生益科技", "kind": "stock", "code": "600183"}]}
+    cid, nm = _best_cid(reg, "生益科技", exact, write=False)
+    assert cid and "未知主体" not in cid, f"精确命中不该跳过，实得 {cid!r}"
+    assert nm == "生益科技"
+
+    # ②b 同名多实体但身份相同（重复行）→ 不该 bail，仍须给出 cid
+    dup = {"entities": [{"name": "生益科技长控", "kind": "stock", "code": "600183"},
+                        {"name": "生益科技长控", "kind": "stock", "code": "600183"}]}
+    cid, _ = _best_cid(reg, "生益科技长控股份", dup, write=False)
+    assert cid != "", "身份相同的重复实体不构成歧义，不该 bail"
+
+    # ③ 卡内无实体行 → 走兜底，仍须非空（计入"解析仍未知"或直接可回填，不是 bail）
+    cid, _ = _best_cid(reg, "某未登记公司", {"entities": []}, write=False)
+    assert cid != "", "兜底路径不该返回空串，否则会被误记成精度 bail"
+
+    reg.conn.close()
